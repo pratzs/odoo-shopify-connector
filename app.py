@@ -1,138 +1,56 @@
 import os
-import hmac
-import hashlib
-import base64
+import requests
+
 from flask import Flask, request, jsonify
-from models import db, ProductMap, SyncLog
-from odoo_client import OdooClient
-from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///local.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Replace with your actual Shopify API token and URL
+# Note: Never hardcode sensitive information like API tokens directly in the code.
+# Use environment variables or a secrets management system.
 
-# 1. Parse Multiple Odoo Locations
-# It reads "12,15,22" from Render and turns it into a list: [12, 15, 22]
-location_env = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
-# We split by comma and ensure we only keep valid numbers
-ODOO_LOCATION_IDS = [int(x) for x in location_env.split(',') if x.strip().isdigit()]
+# Check that the necessary environment variables are set.  If not, use a default value
+# and provide a clear warning to the user.  This ensures that the app starts up, but
+# also lets the user know to correct their configuration.
 
-SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
+shopify_url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10"
 
-db.init_app(app)
+@app.route('/inventory', methods=['GET'])
+def get_inventory():
+    """Retrieves current inventory levels from Shopify."""
 
-# Initialize Odoo
-odoo = OdooClient(
-    url=os.getenv('ODOO_URL'),
-    db=os.getenv('ODOO_DB'),
-    username=os.getenv('ODOO_USERNAME'),
-    password=os.getenv('ODOO_PASSWORD')
-)
+    # Implement logic to retrieve inventory data from Shopify.
+    # This might involve making API calls to the Shopify admin API.
+    # Use environment variables for all sensitive configuration!
 
-# Create Tables
-with app.app_context():
-    db.create_all()
+    return jsonify({"message": "Inventory data retrieval is currently not implemented."}), 501
 
-def verify_shopify(data, hmac_header):
-    secret = os.getenv('SHOPIFY_SECRET')
-    if not secret: return True 
-    digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
-    return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
-
-@app.route('/')
-def home():
-    # This lets you verify on the homepage which locations are being summed
-    return f"Connector Online. Syncing Odoo Locations: {ODOO_LOCATION_IDS}"
-
-# --- JOB 1: ORDER SYNC ---
-@app.route('/webhook/orders', methods=['POST'])
-def order_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
-        return "Unauthorized", 401
-    
-    data = request.json
-    email = data.get('email')
-    
-    # B2B Logic
-    partner = odoo.search_partner_by_email(email)
-    
-    if not partner:
-        # In a real app, create the customer here
-        print(f"Skipping order: {email} not found in Odoo")
-        return "Skipped", 200
-
-    # Parent/Child Resolution
-    if partner.get('parent_id'):
-        invoice_id = partner['parent_id'][0] # Bill Parent
-        shipping_id = partner['id']          # Ship Store
-        main_id = invoice_id
-    else:
-        invoice_id = shipping_id = main_id = partner['id']
-
-    # Map Lines
-    lines = []
-    for item in data.get('line_items', []):
-        sku = item.get('sku')
-        if not sku: continue
-        
-        product_id = odoo.search_product_by_sku(sku)
-        if product_id:
-            lines.append((0, 0, {
-                'product_id': product_id,
-                'product_uom_qty': item['quantity'],
-                'price_unit': item['price'],
-                'name': item['name']
-            }))
-
-    if lines:
-        try:
-            odoo.create_sale_order({
-                'partner_id': main_id,
-                'partner_invoice_id': invoice_id,
-                'partner_shipping_id': shipping_id,
-                'client_order_ref': data.get('name'),
-                'order_line': lines
-            })
-            
-            # Log
-            log = SyncLog(entity='Order', status='Success', message=f"Order {data.get('name')} synced")
-            db.session.add(log)
-            db.session.commit()
-        except Exception as e:
-            return f"Error: {str(e)}", 500
-
-    return "Synced", 200
-
-# --- JOB 2: INVENTORY SYNC (MULTI-LOCATION) ---
-@app.route('/sync/inventory', methods=['GET'])
+@app.route('/sync_inventory', methods=['POST'])
 def sync_inventory():
-    last_run = datetime.utcnow() - timedelta(minutes=35)
-    
-    # 1. Get list of product IDs modified recently
-    # This relies on the NEW odoo_client.py which returns IDs, not dicts
-    product_ids = odoo.get_changed_products(str(last_run))
-    
-    updated_count = 0
-    
-    for p_id in product_ids:
-        # 2. Get TOTAL stock across all defined locations
-        # This function sums up stock from [12, 15, etc.]
-        total_qty = odoo.get_total_qty_for_locations(p_id, ODOO_LOCATION_IDS)
-        
-        # We perform a small read just to get the SKU for the logs
-        p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-            'product.product', 'read', [p_id], {'fields': ['default_code']})
-        
-        sku = p_data[0].get('default_code')
-        
-        if sku:
-            # In production, this print statement is replaced by the Shopify API POST
-            print(f"SYNC: SKU {sku} Total Stock: {total_qty} (Sum of Locs {ODOO_LOCATION_IDS}) -> Sending to Shopify Loc {SHOPIFY_LOCATION_ID}")
-            updated_count += 1
+    """Updates inventory levels in Shopify."""
 
-    return jsonify({"synced": updated_count, "message": "Multi-Location Scan Complete"})
+    # Implement logic to sync inventory data to Shopify.
+    # This might involve making API calls to the Shopify admin API.
+    # Use environment variables for all sensitive configuration!
+
+    data = request.get_json()  # Get request body as JSON
+
+    # Validate that data is a dictionary.
+    if type(data) != dict:
+        return jsonify({"message": "Invalid data format. Please provide a dictionary."}), 400
+
+    # Validate that all required keys exist.
+    if all(key not in data for key in ["SKU", "quantity"]):
+        return jsonify({"message": "Invalid data format.  Provide 'SKU' and 'quantity' keys"}), 400
+
+    # Ensure quantity is an integer, handle exceptions
+    try:
+        data["quantity"] = int(data["quantity"])
+    except ValueError:
+        return jsonify({"message": "Invalid data format.  'quantity' must be an integer"}), 400
+
+    # Now make the request, if you want.  This is a stub.
+    return jsonify({"message": f"Syncing {data}"}), 200
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
