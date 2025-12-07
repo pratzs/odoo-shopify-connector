@@ -117,13 +117,15 @@ def order_webhook():
 
     # Parent/Child Resolution Logic
     if partner.get('parent_id'):
-        invoice_id = partner['parent_id'][0] 
-        shipping_id = partner['id']          
+        invoice_id = partner['parent_id'][0] # ID of Parent Company (Bill To)
+        shipping_id = partner['id']          # ID of Store/Manager (Ship To)
         main_id = invoice_id
     else:
+        # Standard customer
         invoice_id = shipping_id = main_id = partner['id']
 
     lines = []
+    # 1. Process Product Lines
     for item in data.get('line_items', []):
         sku = item.get('sku')
         if not sku: continue
@@ -146,7 +148,7 @@ def order_webhook():
                 'discount': discount_percent
             }))
 
-    # Process Shipping Lines
+    # 2. Process Shipping Lines (MATCH BY NAME)
     shipping_lines = data.get('shipping_lines', [])
     if shipping_lines:
         for ship in shipping_lines:
@@ -172,6 +174,19 @@ def order_webhook():
         shopify_name = data.get('name') 
         client_ref = f"ONLINE_{shopify_name}" 
 
+        # 3. Process Notes & Payment Method
+        customer_note = data.get('note')
+        payment_gateways = data.get('payment_gateway_names', [])
+        gateway_str = ", ".join(payment_gateways)
+        
+        odoo_notes = []
+        if customer_note:
+            odoo_notes.append(f"Customer Note: {customer_note}")
+        if gateway_str:
+            odoo_notes.append(f"Payment Method: {gateway_str}")
+            
+        final_note = "\n\n".join(odoo_notes)
+
         try:
             odoo.create_sale_order({
                 'name': client_ref,             
@@ -181,7 +196,8 @@ def order_webhook():
                 'partner_shipping_id': shipping_id,
                 'order_line': lines,
                 'user_id': odoo.uid, 
-                'state': 'draft'     
+                'state': 'draft',
+                'note': final_note # Adds notes to bottom of order
             })
             
             log = SyncLog(entity='Order', status='Success', message=f"Order {client_ref} synced. Ship ID: {shipping_id}")
