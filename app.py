@@ -48,9 +48,28 @@ with app.app_context():
 
 def verify_shopify(data, hmac_header):
     secret = os.getenv('SHOPIFY_SECRET')
-    if not secret: return True 
+    if not secret: 
+        print("DEBUG: No SHOPIFY_SECRET set in env vars.")
+        return True # Bypass if no secret set (Dev mode)
+    
+    if not hmac_header:
+        print("DEBUG: Request missing X-Shopify-Hmac-Sha256 header")
+        return False
+
+    # Calculate HMAC
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
-    return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
+    computed_hmac = base64.b64encode(digest).decode()
+    
+    # Compare
+    is_valid = hmac.compare_digest(computed_hmac, hmac_header)
+    
+    if not is_valid:
+        print(f"DEBUG: HMAC Mismatch!")
+        print(f"   > Shopify Sent: {hmac_header}")
+        print(f"   > We Calculated: {computed_hmac}")
+        print(f"   > Secret Length: {len(secret)} (Check for hidden spaces!)")
+    
+    return is_valid
 
 # --- DASHBOARD (UI) ---
 @app.route('/')
@@ -69,9 +88,7 @@ def simulate_order():
     if not odoo: return jsonify({"message": "Odoo Offline"}), 500
     
     test_email = os.getenv('ODOO_USERNAME') 
-    # Logic: We use 'TEST-' prefix here for the button simulation
     test_order_ref = f"TEST-SIM-{random.randint(1000,9999)}"
-    
     partner = odoo.search_partner_by_email(test_email)
     
     if not partner:
@@ -84,7 +101,6 @@ def simulate_order():
     else:
         invoice_id = shipping_id = main_id = partner['id']
 
-    # We just log the hierarchy check for the simulation
     log = SyncLog(entity='Test Connection', status='Success', 
                   message=f"Simulation: {test_order_ref} would bill Parent ID {main_id} and ship to Child ID {shipping_id}")
     db.session.add(log)
@@ -96,6 +112,8 @@ def simulate_order():
 @app.route('/webhook/orders', methods=['POST'])
 def order_webhook():
     if not odoo: return "Offline", 500
+    
+    # If this fails, it will now print WHY in the Render Logs
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
         return "Unauthorized", 401
     
@@ -109,7 +127,6 @@ def order_webhook():
         db.session.commit()
         return "Skipped", 200
 
-    # Parent/Child Resolution
     if partner.get('parent_id'):
         invoice_id = partner['parent_id'][0] 
         shipping_id = partner['id']
@@ -131,9 +148,7 @@ def order_webhook():
             }))
 
     if lines:
-        # --- CUSTOM PREFIX LOGIC ---
-        shopify_name = data.get('name') # e.g. "#1050"
-        # We add "CUSTOM-" so you can differentiate from Techmarbles
+        shopify_name = data.get('name')
         client_ref = f"CUSTOM-{shopify_name}" 
 
         try:
@@ -141,7 +156,7 @@ def order_webhook():
                 'partner_id': main_id,
                 'partner_invoice_id': invoice_id,
                 'partner_shipping_id': shipping_id,
-                'client_order_ref': client_ref, # Sends "CUSTOM-#1050" to Odoo
+                'client_order_ref': client_ref,
                 'order_line': lines
             })
             
@@ -172,7 +187,6 @@ def sync_inventory():
         total_qty = odoo.get_total_qty_for_locations(p_id, ODOO_LOCATION_IDS)
         updated_count += 1
         
-        # Log first item for visibility
         if updated_count == 1:
              p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'read', [p_id], {'fields': ['default_code']})
