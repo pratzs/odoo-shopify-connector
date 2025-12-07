@@ -117,15 +117,13 @@ def order_webhook():
 
     # Parent/Child Resolution Logic
     if partner.get('parent_id'):
-        invoice_id = partner['parent_id'][0] # ID of Parent Company (Bill To)
-        shipping_id = partner['id']          # ID of Store/Manager (Ship To)
+        invoice_id = partner['parent_id'][0] 
+        shipping_id = partner['id']          
         main_id = invoice_id
     else:
-        # Standard customer
         invoice_id = shipping_id = main_id = partner['id']
 
     lines = []
-    # 1. Process Product Lines
     for item in data.get('line_items', []):
         sku = item.get('sku')
         if not sku: continue
@@ -148,7 +146,7 @@ def order_webhook():
                 'discount': discount_percent
             }))
 
-    # 2. Process Shipping Lines (MATCH BY NAME)
+    # Process Shipping Lines
     shipping_lines = data.get('shipping_lines', [])
     if shipping_lines:
         for ship in shipping_lines:
@@ -171,14 +169,13 @@ def order_webhook():
                 }))
 
     if lines:
-        shopify_name = data.get('name') # e.g. #2046
-        # UPDATED PREFIX LOGIC
+        shopify_name = data.get('name') 
         client_ref = f"ONLINE_{shopify_name}" 
 
         try:
             odoo.create_sale_order({
-                'name': client_ref,             # FORCE ODOO ORDER NUMBER (Overrides SO001)
-                'client_order_ref': client_ref, # Sets the "Customer Reference" field
+                'name': client_ref,             
+                'client_order_ref': client_ref, 
                 'partner_id': main_id,
                 'partner_invoice_id': invoice_id,
                 'partner_shipping_id': shipping_id,
@@ -197,6 +194,39 @@ def order_webhook():
             return f"Error: {str(e)}", 500
 
     return "Synced", 200
+
+# --- JOB 1.5: ORDER CANCELLATION SYNC (Shopify -> Odoo) ---
+@app.route('/webhook/orders/cancelled', methods=['POST'])
+def order_cancelled_webhook():
+    if not odoo: return "Offline", 500
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
+        return "Unauthorized", 401
+
+    data = request.json
+    shopify_name = data.get('name')
+    client_ref = f"ONLINE_{shopify_name}"
+
+    # Search for this order in Odoo
+    # We look for orders with this reference that are NOT already cancelled
+    order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+        'sale.order', 'search', [[['client_order_ref', '=', client_ref], ['state', '!=', 'cancel']]])
+
+    if order_ids:
+        try:
+            odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'action_cancel', [order_ids])
+            
+            log = SyncLog(entity='Order Cancel', status='Success', message=f"Cancelled Odoo Order {client_ref}")
+            db.session.add(log)
+            db.session.commit()
+            return "Cancelled", 200
+        except Exception as e:
+            log = SyncLog(entity='Order Cancel', status='Error', message=str(e))
+            db.session.add(log)
+            db.session.commit()
+            return f"Error: {str(e)}", 500
+            
+    return "Order not found or already cancelled", 200
 
 # --- JOB 2: INVENTORY SYNC ---
 @app.route('/sync/inventory', methods=['GET'])
@@ -223,6 +253,48 @@ def sync_inventory():
              db.session.commit()
 
     return jsonify({"synced": updated_count})
+
+# --- JOB 3: ORDER STATUS SYNC (Odoo -> Shopify) ---
+@app.route('/sync/order_status', methods=['GET'])
+def sync_order_status():
+    if not odoo: return jsonify({"error": "Offline"}), 500
+    
+    # 1. Find orders cancelled in Odoo recently (last 35 mins)
+    last_run = datetime.utcnow() - timedelta(minutes=35)
+    domain = [('write_date', '>', str(last_run)), ('state', '=', 'cancel')]
+    
+    cancelled_orders = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+        'sale.order', 'search_read', [domain], {'fields': ['client_order_ref']})
+    
+    updated_count = 0
+    headers = {
+        "X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN'),
+        "Content-Type": "application/json"
+    }
+    
+    for order in cancelled_orders:
+        ref = order.get('client_order_ref', '')
+        # Only process orders created by this app (ONLINE_#...)
+        if ref and ref.startswith('ONLINE_#'):
+            shopify_name = ref.replace('ONLINE_', '') # e.g. #2046
+            
+            # 2. Find Shopify ID using the Name
+            search_url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?name={shopify_name}&status=open"
+            res = requests.get(search_url, headers=headers)
+            
+            if res.status_code == 200 and res.json().get('orders'):
+                shopify_order_id = res.json()['orders'][0]['id']
+                
+                # 3. Cancel in Shopify
+                cancel_url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{shopify_order_id}/cancel.json"
+                requests.post(cancel_url, headers=headers)
+                
+                log = SyncLog(entity='Status Sync', status='Success', message=f"Cancelled Shopify Order {shopify_name}")
+                db.session.add(log)
+                db.session.commit()
+                updated_count += 1
+
+    return jsonify({"cancelled_syncs": updated_count})
 
 if __name__ == '__main__':
     app.run(debug=True)
