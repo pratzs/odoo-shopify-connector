@@ -2,11 +2,12 @@ import os
 import hmac
 import hashlib
 import base64
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from models import db, ProductMap, SyncLog
 from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
+import random
 
 app = Flask(__name__)
 
@@ -58,10 +59,47 @@ def verify_shopify(data, hmac_header):
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
 
+# --- DASHBOARD (UI) ---
 @app.route('/')
-def home():
-    status = "Online" if odoo else "Offline (Check Logs)"
-    return f"Connector Status: {status} | Syncing Odoo Locations: {ODOO_LOCATION_IDS} | Target API: 2025-10"
+def dashboard():
+    # Fetch recent logs from DB to show in the table
+    logs = []
+    try:
+        logs = SyncLog.query.order_by(SyncLog.timestamp.desc()).limit(20).all()
+    except:
+        print("Error fetching logs, database might not be ready.")
+    
+    odoo_status = True if odoo else False
+    return render_template('dashboard.html', logs=logs, odoo_status=odoo_status, locations=ODOO_LOCATION_IDS)
+
+# --- SIMULATE TEST ORDER (For UI Button) ---
+@app.route('/test/simulate_order', methods=['POST'])
+def simulate_order():
+    if not odoo: 
+        return jsonify({"message": "Odoo Offline - Cannot test"}), 500
+    
+    try:
+        # 1. Try to find the Admin partner to prove read access
+        # We use the username/email configured in env vars as a known existing user
+        test_email = os.getenv('ODOO_USERNAME') 
+        partner = odoo.search_partner_by_email(test_email)
+        
+        if partner:
+            msg = f"Success! Found Admin Partner ID: {partner['id']}. Connection is good."
+            status = 'Success'
+        else:
+            msg = f"Connected to Odoo, but could not find partner with email {test_email}"
+            status = 'Warning'
+
+        # Log this test to the database so it shows on the dashboard
+        log = SyncLog(entity='Test Connection', status=status, message=msg)
+        db.session.add(log)
+        db.session.commit()
+        
+        return jsonify({"message": msg})
+        
+    except Exception as e:
+        return jsonify({"message": f"Test Failed: {str(e)}"}), 500
 
 # --- JOB 1: ORDER SYNC ---
 @app.route('/webhook/orders', methods=['POST'])
@@ -79,7 +117,9 @@ def order_webhook():
     partner = odoo.search_partner_by_email(email)
     
     if not partner:
-        print(f"Skipping order: {email} not found in Odoo")
+        log = SyncLog(entity='Order', status='Skipped', message=f"Customer {email} not found in Odoo")
+        db.session.add(log)
+        db.session.commit()
         return "Skipped", 200
 
     # Parent/Child Resolution
@@ -115,11 +155,15 @@ def order_webhook():
                 'order_line': lines
             })
             
-            # Log
-            log = SyncLog(entity='Order', status='Success', message=f"Order {data.get('name')} synced")
+            # Log Success
+            log = SyncLog(entity='Order', status='Success', message=f"Order {data.get('name')} synced to Partner {main_id}")
             db.session.add(log)
             db.session.commit()
         except Exception as e:
+            # Log Error
+            log = SyncLog(entity='Order', status='Failed', message=str(e))
+            db.session.add(log)
+            db.session.commit()
             return f"Error: {str(e)}", 500
 
     return "Synced", 200
@@ -132,7 +176,6 @@ def sync_inventory():
 
     last_run = datetime.utcnow() - timedelta(minutes=35)
     
-    # 1. Get list of product IDs modified recently
     try:
         product_ids = odoo.get_changed_products(str(last_run))
     except Exception as e:
@@ -158,10 +201,14 @@ def sync_inventory():
         sku = p_data[0].get('default_code')
         
         if sku:
+            # Log the action so it appears in the dashboard
+            log = SyncLog(entity='Inventory', status='Info', message=f"SKU {sku} Total: {total_qty}")
+            db.session.add(log)
+            db.session.commit()
+            
             # OPTIONAL: To enable writing to Shopify, uncomment below.
             # requests.post(f"{shopify_base_url}/inventory_levels/set.json", ...)
             
-            print(f"SYNC [2025-10]: SKU {sku} Total Stock: {total_qty} -> Shopify Loc {SHOPIFY_LOCATION_ID}")
             updated_count += 1
 
     return jsonify({"synced": updated_count, "message": "Multi-Location Scan Complete (2025-10)"})
