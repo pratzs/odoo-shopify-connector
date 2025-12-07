@@ -15,6 +15,36 @@
     </style>
 </head>
 <body>
+    <!-- MACRO DEFINITION MUST BE AT THE TOP -->
+    {% macro render_log_table(log_list) %}
+    <div class="table-responsive">
+        <table class="table table-striped table-hover mb-0 table-sm">
+            <thead>
+                <tr>
+                    <th style="width: 20%">Time (UTC)</th>
+                    <th style="width: 15%">Status</th>
+                    <th>Message</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in log_list %}
+                <tr>
+                    <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td>
+                        <span class="badge {{ 'bg-success' if log.status == 'Success' else ('bg-warning' if log.status == 'Skipped' else 'bg-danger') }}">
+                            {{ log.status }}
+                        </span>
+                    </td>
+                    <td>{{ log.message }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" class="text-center p-3 text-muted">No logs recorded yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endmacro %}
+
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
         <div class="container">
             <a class="navbar-brand" href="#">
@@ -63,7 +93,7 @@
                         <a class="nav-link" id="customers-tab" data-bs-toggle="tab" href="#customers" role="tab">Customers</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" id="products-tab" data-bs-toggle="tab" href="#products" role="tab">Products/Errors</a>
+                        <a class="nav-link" id="products-tab" data-bs-toggle="tab" href="#products" role="tab">System/Errors</a>
                     </li>
                 </ul>
             </div>
@@ -105,36 +135,6 @@
             <div class="toast-body" id="toastMessage"></div>
         </div>
     </div>
-
-    <!-- Macro for Table -->
-    {% macro render_log_table(log_list) %}
-    <div class="table-responsive">
-        <table class="table table-striped table-hover mb-0 table-sm">
-            <thead>
-                <tr>
-                    <th style="width: 20%">Time (UTC)</th>
-                    <th style="width: 15%">Status</th>
-                    <th>Message</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for log in log_list %}
-                <tr>
-                    <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                    <td>
-                        <span class="badge {{ 'bg-success' if log.status == 'Success' else ('bg-warning' if log.status == 'Skipped' else 'bg-danger') }}">
-                            {{ log.status }}
-                        </span>
-                    </td>
-                    <td>{{ log.message }}</td>
-                </tr>
-                {% else %}
-                <tr><td colspan="3" class="text-center p-3 text-muted">No logs recorded yet.</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% endmacro %}
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
