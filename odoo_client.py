@@ -30,27 +30,24 @@ class OdooClient:
             'product.product', 'search', [[['default_code', '=', sku]]])
         return ids[0] if ids else None
 
+    def search_product_by_name(self, name):
+        """Finds product ID by Name (Useful for Shipping Methods)"""
+        # Case insensitive search ('ilike')
+        ids = self.models.execute_kw(self.db, self.uid, self.password,
+            'product.product', 'search', [[['name', 'ilike', name]]])
+        return ids[0] if ids else None
+
     def get_changed_products(self, time_limit_str):
-        """
-        Finds IDs of products changed recently.
-        Used by the sync job to know which products to check.
-        """
+        """Finds IDs of products changed recently."""
         domain = [('write_date', '>', time_limit_str), ('type', '=', 'product')]
-        # We only return the list of IDs here
         return self.models.execute_kw(self.db, self.uid, self.password,
             'product.product', 'search', [domain])
 
     def get_total_qty_for_locations(self, product_id, location_ids):
-        """
-        Calculates total stock for a product across multiple Odoo locations.
-        It calls Odoo for each location ID and sums the result.
-        """
+        """Calculates total stock for a product across multiple Odoo locations."""
         total_qty = 0
         for loc_id in location_ids:
-            # We use the 'context' dictionary to tell Odoo "Read stock from THIS specific location"
             context = {'location': loc_id}
-            
-            # Read the quantity for this specific location context
             data = self.models.execute_kw(self.db, self.uid, self.password,
                 'product.product', 'read', [product_id],
                 {'fields': ['qty_available'], 'context': context})
