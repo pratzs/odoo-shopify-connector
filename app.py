@@ -50,26 +50,15 @@ def verify_shopify(data, hmac_header):
     secret = os.getenv('SHOPIFY_SECRET')
     if not secret: 
         print("DEBUG: No SHOPIFY_SECRET set in env vars.")
-        return True # Bypass if no secret set (Dev mode)
+        return True 
     
     if not hmac_header:
         print("DEBUG: Request missing X-Shopify-Hmac-Sha256 header")
         return False
 
-    # Calculate HMAC
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     computed_hmac = base64.b64encode(digest).decode()
-    
-    # Compare
-    is_valid = hmac.compare_digest(computed_hmac, hmac_header)
-    
-    if not is_valid:
-        print(f"DEBUG: HMAC Mismatch!")
-        print(f"   > Shopify Sent: {hmac_header}")
-        print(f"   > We Calculated: {computed_hmac}")
-        print(f"   > Secret Length: {len(secret)} (Double check Settings > Notifications > Webhook Key)")
-    
-    return is_valid
+    return hmac.compare_digest(computed_hmac, hmac_header)
 
 # --- DASHBOARD (UI) ---
 @app.route('/')
@@ -113,7 +102,6 @@ def simulate_order():
 def order_webhook():
     if not odoo: return "Offline", 500
     
-    # Verify Secret
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
         return "Unauthorized", 401
     
@@ -127,13 +115,17 @@ def order_webhook():
         db.session.commit()
         return "Skipped", 200
 
-    # Parent/Child Resolution
+    # Parent/Child Resolution Logic
     if partner.get('parent_id'):
-        invoice_id = partner['parent_id'][0] 
-        shipping_id = partner['id']
+        invoice_id = partner['parent_id'][0] # ID of Parent Company (Bill To)
+        shipping_id = partner['id']          # ID of Store/Manager (Ship To)
         main_id = invoice_id
+        # Log to verifying correct address selection
+        print(f"DEBUG: Hierarchy Found. Bill To Parent: {invoice_id} | Ship To Child: {shipping_id}")
     else:
+        # Standard customer
         invoice_id = shipping_id = main_id = partner['id']
+        print(f"DEBUG: No Hierarchy. Bill/Ship To Same: {shipping_id}")
 
     lines = []
     # 1. Process Product Lines
@@ -143,8 +135,6 @@ def order_webhook():
         product_id = odoo.search_product_by_sku(sku)
         
         if product_id:
-            # CALCULATE DISCOUNT PERCENTAGE
-            # Odoo needs %, Shopify gives Amount
             price = float(item.get('price', 0))
             qty = int(item.get('quantity', 1))
             discount_amount = float(item.get('total_discount', 0))
@@ -158,28 +148,34 @@ def order_webhook():
                 'product_uom_qty': qty,
                 'price_unit': price,
                 'name': item['name'],
-                'discount': discount_percent # Send the calculated %
+                'discount': discount_percent
             }))
 
-    # 2. Process Shipping Lines
+    # 2. Process Shipping Lines (MATCH BY NAME)
     shipping_lines = data.get('shipping_lines', [])
     if shipping_lines:
-        # Try to find a generic shipping product in Odoo
-        shipping_product_id = odoo.search_product_by_sku('SHIPPING')
-        
         for ship in shipping_lines:
             cost = float(ship.get('price', 0))
-            if cost > 0:
-                if shipping_product_id:
-                    lines.append((0, 0, {
-                        'product_id': shipping_product_id,
-                        'product_uom_qty': 1,
-                        'price_unit': cost,
-                        'name': f"Shipping: {ship.get('title')}",
-                        'is_delivery': True
-                    }))
-                else:
-                    print("WARNING: No product with SKU 'SHIPPING' found in Odoo. Shipping cost skipped.")
+            title = ship.get('title', 'Shipping')
+            
+            # Try to find exact match by Name (e.g. "Standard Shipping")
+            shipping_product_id = odoo.search_product_by_name(title)
+            
+            # Fallback: Try "Shipping" or "Delivery" if specific name not found
+            if not shipping_product_id:
+                print(f"DEBUG: Specific shipping '{title}' not found. Trying generic 'Shipping'.")
+                shipping_product_id = odoo.search_product_by_name("Shipping")
+            
+            if cost >= 0 and shipping_product_id:
+                lines.append((0, 0, {
+                    'product_id': shipping_product_id,
+                    'product_uom_qty': 1,
+                    'price_unit': cost,
+                    'name': title, # Use the Shopify title description
+                    'is_delivery': True
+                }))
+            else:
+                print(f"WARNING: Could not find Odoo product for shipping '{title}'")
 
     if lines:
         shopify_name = data.get('name')
@@ -192,11 +188,11 @@ def order_webhook():
                 'partner_shipping_id': shipping_id,
                 'client_order_ref': client_ref,
                 'order_line': lines,
-                'user_id': odoo.uid, # Sets Salesperson to the API User (Pratham)
-                'state': 'draft'     # Force Draft state (Quotation)
+                'user_id': odoo.uid, 
+                'state': 'draft'     
             })
             
-            log = SyncLog(entity='Order', status='Success', message=f"Order {client_ref} synced to Partner {main_id}")
+            log = SyncLog(entity='Order', status='Success', message=f"Order {client_ref} synced. Ship ID: {shipping_id}")
             db.session.add(log)
             db.session.commit()
         except Exception as e:
