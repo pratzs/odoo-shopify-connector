@@ -27,19 +27,21 @@
                 </tr>
             </thead>
             <tbody>
-                {% for log in log_list %}
-                <tr>
-                    <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                    <td>
-                        <span class="badge {{ 'bg-success' if log.status == 'Success' else ('bg-warning' if log.status == 'Skipped' else 'bg-danger') }}">
-                            {{ log.status }}
-                        </span>
-                    </td>
-                    <td>{{ log.message }}</td>
-                </tr>
+                {% if log_list is defined and log_list %}
+                    {% for log in log_list %}
+                    <tr>
+                        <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        <td>
+                            <span class="badge {{ 'bg-success' if log.status == 'Success' else ('bg-warning' if log.status == 'Skipped' or log.status == 'Warning' else 'bg-danger') }}">
+                                {{ log.status }}
+                            </span>
+                        </td>
+                        <td>{{ log.message }}</td>
+                    </tr>
+                    {% endfor %}
                 {% else %}
-                <tr><td colspan="3" class="text-center p-3 text-muted">No logs recorded yet.</td></tr>
-                {% endfor %}
+                    <tr><td colspan="3" class="text-center p-3 text-muted">No logs recorded yet (or backend data missing).</td></tr>
+                {% endif %}
             </tbody>
         </table>
     </div>
@@ -50,9 +52,14 @@
             <a class="navbar-brand" href="#">
                 <i class="bi bi-arrow-left-right"></i> Shopify ↔ Odoo
             </a>
-            <span class="navbar-text text-light small">
-                Status: <span class="badge {{ 'bg-success' if odoo_status else 'bg-danger' }}">{{ 'Online' if odoo_status else 'Offline' }}</span>
-            </span>
+            <div class="d-flex align-items-center gap-3">
+                <span class="navbar-text text-light small">
+                    Status: <span class="badge {{ 'bg-success' if odoo_status else 'bg-danger' }}">{{ 'Online' if odoo_status else 'Offline' }}</span>
+                </span>
+                <button onclick="location.reload()" class="btn btn-sm btn-outline-light">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
         </div>
     </nav>
 
@@ -102,22 +109,38 @@
                     
                     <!-- Orders Tab -->
                     <div class="tab-pane fade show active" id="orders" role="tabpanel">
-                        {{ render_log_table(logs_orders) }}
+                        {% if logs_orders is defined %}
+                            {{ render_log_table(logs_orders) }}
+                        {% else %}
+                            <div class="p-3 text-danger">Error: App.py not updated to send Order logs.</div>
+                        {% endif %}
                     </div>
 
                     <!-- Inventory Tab -->
                     <div class="tab-pane fade" id="inventory" role="tabpanel">
-                        {{ render_log_table(logs_inventory) }}
+                        {% if logs_inventory is defined %}
+                            {{ render_log_table(logs_inventory) }}
+                        {% else %}
+                            <div class="p-3 text-danger">Error: App.py not updated to send Inventory logs.</div>
+                        {% endif %}
                     </div>
 
                     <!-- Customers Tab -->
                     <div class="tab-pane fade" id="customers" role="tabpanel">
-                        {{ render_log_table(logs_customers) }}
+                        {% if logs_customers is defined %}
+                            {{ render_log_table(logs_customers) }}
+                        {% else %}
+                            <div class="p-3 text-danger">Error: App.py not updated to send Customer logs.</div>
+                        {% endif %}
                     </div>
 
                     <!-- Products/System Tab -->
                     <div class="tab-pane fade" id="products" role="tabpanel">
-                        {{ render_log_table(logs_system) }}
+                        {% if logs_system is defined %}
+                            {{ render_log_table(logs_system) }}
+                        {% else %}
+                            <div class="p-3 text-danger">Error: App.py not updated to send System logs.</div>
+                        {% endif %}
                     </div>
 
                 </div>
@@ -141,6 +164,7 @@
         function showToast(msg) {
             document.getElementById('toastMessage').innerText = msg;
             new bootstrap.Toast(document.getElementById('liveToast')).show();
+            // Reload after 2 seconds to see the new log in the table
             setTimeout(() => location.reload(), 2000);
         }
         function triggerAction(url, method='GET') {
