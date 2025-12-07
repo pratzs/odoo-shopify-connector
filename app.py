@@ -113,7 +113,7 @@ def simulate_order():
 def order_webhook():
     if not odoo: return "Offline", 500
     
-    # If this fails, it will now print WHY in the Render Logs
+    # Verify Secret
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
         return "Unauthorized", 401
     
@@ -127,6 +127,7 @@ def order_webhook():
         db.session.commit()
         return "Skipped", 200
 
+    # Parent/Child Resolution
     if partner.get('parent_id'):
         invoice_id = partner['parent_id'][0] 
         shipping_id = partner['id']
@@ -135,17 +136,50 @@ def order_webhook():
         invoice_id = shipping_id = main_id = partner['id']
 
     lines = []
+    # 1. Process Product Lines
     for item in data.get('line_items', []):
         sku = item.get('sku')
         if not sku: continue
         product_id = odoo.search_product_by_sku(sku)
+        
         if product_id:
+            # CALCULATE DISCOUNT PERCENTAGE
+            # Odoo needs %, Shopify gives Amount
+            price = float(item.get('price', 0))
+            qty = int(item.get('quantity', 1))
+            discount_amount = float(item.get('total_discount', 0))
+            
+            discount_percent = 0.0
+            if price > 0 and qty > 0 and discount_amount > 0:
+                discount_percent = (discount_amount / (price * qty)) * 100
+
             lines.append((0, 0, {
                 'product_id': product_id,
-                'product_uom_qty': item['quantity'],
-                'price_unit': item['price'],
-                'name': item['name']
+                'product_uom_qty': qty,
+                'price_unit': price,
+                'name': item['name'],
+                'discount': discount_percent # Send the calculated %
             }))
+
+    # 2. Process Shipping Lines
+    shipping_lines = data.get('shipping_lines', [])
+    if shipping_lines:
+        # Try to find a generic shipping product in Odoo
+        shipping_product_id = odoo.search_product_by_sku('SHIPPING')
+        
+        for ship in shipping_lines:
+            cost = float(ship.get('price', 0))
+            if cost > 0:
+                if shipping_product_id:
+                    lines.append((0, 0, {
+                        'product_id': shipping_product_id,
+                        'product_uom_qty': 1,
+                        'price_unit': cost,
+                        'name': f"Shipping: {ship.get('title')}",
+                        'is_delivery': True
+                    }))
+                else:
+                    print("WARNING: No product with SKU 'SHIPPING' found in Odoo. Shipping cost skipped.")
 
     if lines:
         shopify_name = data.get('name')
@@ -157,7 +191,9 @@ def order_webhook():
                 'partner_invoice_id': invoice_id,
                 'partner_shipping_id': shipping_id,
                 'client_order_ref': client_ref,
-                'order_line': lines
+                'order_line': lines,
+                'user_id': odoo.uid, # Sets Salesperson to the API User (Pratham)
+                'state': 'draft'     # Force Draft state (Quotation)
             })
             
             log = SyncLog(entity='Order', status='Success', message=f"Order {client_ref} synced to Partner {main_id}")
