@@ -77,7 +77,7 @@ def simulate_order():
     if not odoo: return jsonify({"message": "Odoo Offline"}), 500
     
     test_email = os.getenv('ODOO_USERNAME') 
-    test_order_ref = f"TEST-SIM-{random.randint(1000,9999)}"
+    test_order_ref = f"ONLINE_#SIM{random.randint(100,999)}"
     partner = odoo.search_partner_by_email(test_email)
     
     if not partner:
@@ -91,7 +91,7 @@ def simulate_order():
         invoice_id = shipping_id = main_id = partner['id']
 
     log = SyncLog(entity='Test Connection', status='Success', 
-                  message=f"Simulation: {test_order_ref} would bill Parent ID {main_id} and ship to Child ID {shipping_id}")
+                  message=f"Simulation: {test_order_ref} would bill Parent ID {main_id}")
     db.session.add(log)
     db.session.commit()
     
@@ -120,12 +120,9 @@ def order_webhook():
         invoice_id = partner['parent_id'][0] # ID of Parent Company (Bill To)
         shipping_id = partner['id']          # ID of Store/Manager (Ship To)
         main_id = invoice_id
-        # Log to verifying correct address selection
-        print(f"DEBUG: Hierarchy Found. Bill To Parent: {invoice_id} | Ship To Child: {shipping_id}")
     else:
         # Standard customer
         invoice_id = shipping_id = main_id = partner['id']
-        print(f"DEBUG: No Hierarchy. Bill/Ship To Same: {shipping_id}")
 
     lines = []
     # 1. Process Product Lines
@@ -158,10 +155,8 @@ def order_webhook():
             cost = float(ship.get('price', 0))
             title = ship.get('title', 'Shipping')
             
-            # Try to find exact match by Name (e.g. "Standard Shipping")
             shipping_product_id = odoo.search_product_by_name(title)
             
-            # Fallback: Try "Shipping" or "Delivery" if specific name not found
             if not shipping_product_id:
                 print(f"DEBUG: Specific shipping '{title}' not found. Trying generic 'Shipping'.")
                 shipping_product_id = odoo.search_product_by_name("Shipping")
@@ -171,22 +166,22 @@ def order_webhook():
                     'product_id': shipping_product_id,
                     'product_uom_qty': 1,
                     'price_unit': cost,
-                    'name': title, # Use the Shopify title description
+                    'name': title,
                     'is_delivery': True
                 }))
-            else:
-                print(f"WARNING: Could not find Odoo product for shipping '{title}'")
 
     if lines:
-        shopify_name = data.get('name')
-        client_ref = f"CUSTOM-{shopify_name}" 
+        shopify_name = data.get('name') # e.g. #2046
+        # UPDATED PREFIX LOGIC
+        client_ref = f"ONLINE_{shopify_name}" 
 
         try:
             odoo.create_sale_order({
+                'name': client_ref,             # FORCE ODOO ORDER NUMBER (Overrides SO001)
+                'client_order_ref': client_ref, # Sets the "Customer Reference" field
                 'partner_id': main_id,
                 'partner_invoice_id': invoice_id,
                 'partner_shipping_id': shipping_id,
-                'client_order_ref': client_ref,
                 'order_line': lines,
                 'user_id': odoo.uid, 
                 'state': 'draft'     
