@@ -67,7 +67,7 @@ def verify_shopify(data, hmac_header):
         print(f"DEBUG: HMAC Mismatch!")
         print(f"   > Shopify Sent: {hmac_header}")
         print(f"   > We Calculated: {computed_hmac}")
-        print(f"   > Secret Length: {len(secret)} (Check for hidden spaces!)")
+        print(f"   > Secret Length: {len(secret)} (Double check Settings > Notifications > Webhook Key)")
     
     return is_valid
 
