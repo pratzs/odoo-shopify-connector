@@ -197,7 +197,7 @@ def dashboard():
         "field": get_config('inventory_field', 'qty_available'),
         "sync_zero": get_config('sync_zero_stock', False),
         "combine_committed": get_config('combine_committed', False),
-        "company_id": get_config('odoo_company_id', None) # New setting
+        "company_id": get_config('odoo_company_id', None)
     }
 
     odoo_status = True if odoo else False
@@ -217,7 +217,6 @@ def api_get_companies():
 def api_get_locations():
     if not odoo: return jsonify({"error": "Odoo Offline"}), 500
     try:
-        # Check if a specific company is requested
         company_id = request.args.get('company_id')
         locs = odoo.get_locations(company_id)
         return jsonify(locs)
@@ -231,7 +230,7 @@ def api_save_settings():
     set_config('inventory_field', data.get('field', 'qty_available'))
     set_config('sync_zero_stock', data.get('sync_zero', False))
     set_config('combine_committed', data.get('combine_committed', False))
-    set_config('odoo_company_id', data.get('company_id')) # Save Company ID
+    set_config('odoo_company_id', data.get('company_id'))
     return jsonify({"message": "Settings Saved"})
 
 @app.route('/sync/inventory', methods=['GET'])
@@ -265,7 +264,6 @@ def sync_inventory():
 
     return jsonify({"synced": count})
 
-# (Keep manual sync and webhook routes from previous version)
 @app.route('/sync/orders/manual', methods=['GET'])
 def manual_order_fetch():
     url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=10"
