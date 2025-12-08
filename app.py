@@ -13,10 +13,14 @@ import random
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
+# FIX: Handle Supabase connection string for pg8000 driver
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
+
 if database_url:
+    # If it starts with postgres://, change to postgresql+pg8000://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
+    # If it starts with postgresql://, change to postgresql+pg8000://
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
 
@@ -45,22 +49,31 @@ with app.app_context():
 
 # --- HELPERS ---
 def get_config(key, default=None):
+    """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
-    except: return default
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
+    except:
+        return default
 
 def set_config(key, value):
+    """Save setting to DB"""
     try:
         setting = AppSetting.query.get(key)
         if not setting:
             setting = AppSetting(key=key)
             db.session.add(setting)
+        # Store complex data as JSON string
         setting.value = json.dumps(value)
         db.session.commit()
         return True
-    except: return False
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
 
 def verify_shopify(data, hmac_header):
     secret = os.getenv('SHOPIFY_SECRET')
@@ -74,18 +87,24 @@ def log_event(entity, status, message):
         log = SyncLog(entity=entity, status=status, message=message)
         db.session.add(log)
         db.session.commit()
-    except Exception as e: print(f"DB LOG ERROR: {e}")
+    except Exception as e:
+        print(f"DB LOG ERROR: {e}")
 
 def process_order_data(data):
+    """Core logic to sync a single order"""
     email = data.get('email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
+    # 1. Check if Order Exists (Prevent Resend)
     try:
-        existing = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-        if existing: return True, f"Order {client_ref} exists."
-    except Exception as e: return False, str(e)
+        existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+        if existing_ids: return True, f"Order {client_ref} already exists."
+    except Exception as e:
+        return False, f"Odoo Connection Error: {str(e)}"
 
+    # 2. Customer Sync
     partner = odoo.search_partner_by_email(email)
     if not partner:
         log_event('Customer', 'Failed', f"Email {email} not found")
@@ -96,38 +115,65 @@ def process_order_data(data):
     else:
         invoice_id = shipping_id = main_id = partner['id']
 
+    # 3. Build Lines
     lines = []
+    # Products
     for item in data.get('line_items', []):
-        product_id = odoo.search_product_by_sku(item.get('sku'))
+        sku = item.get('sku')
+        if not sku: continue
+        product_id = odoo.search_product_by_sku(sku)
+        
         if product_id:
             price = float(item.get('price', 0))
             qty = int(item.get('quantity', 1))
             discount = float(item.get('total_discount', 0))
             pct = (discount / (price * qty)) * 100 if price > 0 else 0.0
-            lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}))
+            
+            lines.append((0, 0, {
+                'product_id': product_id, 'product_uom_qty': qty,
+                'price_unit': price, 'name': item['name'], 'discount': pct
+            }))
         else:
-            log_event('Product', 'Warning', f"SKU {item.get('sku')} not found")
+            log_event('Product', 'Warning', f"SKU {sku} not found")
 
+    # Shipping (Match by Name)
     for ship in data.get('shipping_lines', []):
-        ship_pid = odoo.search_product_by_name(ship.get('title')) or odoo.search_product_by_name("Shipping")
-        if ship_pid:
-            lines.append((0, 0, {'product_id': ship_pid, 'product_uom_qty': 1, 'price_unit': float(ship.get('price',0)), 'name': ship.get('title'), 'is_delivery': True}))
+        cost = float(ship.get('price', 0))
+        title = ship.get('title', 'Shipping')
+        
+        # Try finding exact name, then fallback to generic
+        ship_pid = odoo.search_product_by_name(title) or odoo.search_product_by_name("Shipping")
+        
+        if cost >= 0 and ship_pid:
+            lines.append((0, 0, {
+                'product_id': ship_pid, 'product_uom_qty': 1,
+                'price_unit': cost, 'name': title, 'is_delivery': True
+            }))
 
     if not lines: return False, "No valid lines"
+
+    # 4. Create Order with Notes
+    notes = []
+    if data.get('note'): notes.append(f"Note: {data['note']}")
     
-    notes = [f"Note: {data.get('note', '')}"]
-    if data.get('payment_gateway_names'): notes.append(f"Payment: {', '.join(data['payment_gateway_names'])}")
+    # Handle Payment Gateway Logic
+    gateways = data.get('payment_gateway_names')
+    if not gateways and data.get('gateway'):
+        gateways = [data.get('gateway')]
+    
+    if gateways: notes.append(f"Payment: {', '.join(gateways)}")
     
     try:
         odoo.create_sale_order({
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
-            'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 'note': "\n".join(notes)
+            'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
+            'note': "\n\n".join(notes)
         })
         log_event('Order', 'Success', f"Synced {client_ref}")
         return True, "Synced"
     except Exception as e:
-        log_event('Order', 'Error', str(e))
+        log_event('Order', 'Error', f"Failed {client_ref}: {str(e)}")
         return False, str(e)
 
 # --- ROUTES ---
@@ -142,6 +188,7 @@ def dashboard():
     except:
         logs_orders = logs_inventory = logs_customers = logs_system = []
     
+    # Get Settings
     env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
@@ -184,6 +231,19 @@ def api_save_settings():
     set_config('combine_committed', data.get('combine_committed', False))
     set_config('odoo_company_id', data.get('company_id'))
     return jsonify({"message": "Settings Saved"})
+
+@app.route('/test/simulate_order', methods=['POST'])
+def simulate_order():
+    if not odoo: return jsonify({"message": "Odoo Offline"}), 500
+    try:
+        test_email = os.getenv('ODOO_USERNAME') 
+        partner = odoo.search_partner_by_email(test_email)
+        status = 'Success' if partner else 'Warning'
+        msg = f"Connection Test: Found Admin ID {partner['id']}" if partner else "Connection Test: Admin email not found"
+        log_event('Test Connection', status, msg)
+        return jsonify({"message": msg})
+    except Exception as e:
+        return jsonify({"message": f"Test Failed: {str(e)}"}), 500
 
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory():
@@ -245,7 +305,6 @@ def import_selected_orders():
             if success: synced += 1
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
-# THIS IS THE MISSING ROUTE FROM YOUR LOGS
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
