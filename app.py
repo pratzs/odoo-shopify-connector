@@ -96,7 +96,7 @@ def process_order_data(data):
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # Load Company ID from Settings
+    # Load Company ID from Settings to prevent cross-company errors
     company_id = get_config('odoo_company_id')
     
     # 1. Check if Order Exists (Prevent Resend)
@@ -147,6 +147,7 @@ def process_order_data(data):
         title = ship.get('title', 'Shipping')
         
         # Try finding exact name, then fallback to generic
+        # Pass company_id to ensure we don't pick a shipping product from the wrong company
         ship_pid = odoo.search_product_by_name(title, company_id) or odoo.search_product_by_name("Shipping", company_id)
         
         if cost >= 0 and ship_pid:
@@ -176,6 +177,7 @@ def process_order_data(data):
             'note': "\n\n".join(notes)
         }
         
+        # Explicitly set the company_id on the order if configured
         if company_id:
              order_vals['company_id'] = int(company_id)
 
