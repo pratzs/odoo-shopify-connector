@@ -132,39 +132,53 @@ def process_order_data(data):
 
     if not lines: return False, "No valid lines to sync"
 
-    # 4. Create Order with Notes (Updated)
-    notes_list = []
-    
-    # Customer Note
-    customer_note = data.get('note')
-    if customer_note: 
-        notes_list.append(f"Customer Note: {customer_note}")
-    
-    # Payment Method (Robust Check)
-    payment_methods = data.get('payment_gateway_names')
-    if not payment_methods:
-        # Fallback to 'gateway' if list is empty
-        gateway = data.get('gateway')
-        if gateway:
-            payment_methods = [gateway]
-            
-    if payment_methods:
-        notes_list.append(f"Payment Method: {', '.join(payment_methods)}")
-        
-    final_note = "\n\n".join(notes_list)
+    # 4. Create Order
+    notes = []
+    if data.get('note'): notes.append(f"Note: {data['note']}")
+    if data.get('payment_gateway_names'): notes.append(f"Payment: {', '.join(data['payment_gateway_names'])}")
     
     try:
         odoo.create_sale_order({
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
             'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
-            'note': final_note 
+            'note': "\n".join(notes)
         })
-        log_event('Order', 'Success', f"Synced {client_ref} to Odoo ID {main_id}. Note: {len(final_note)} chars")
+        log_event('Order', 'Success', f"Synced {client_ref} to Odoo ID {main_id}")
         return True, "Synced"
     except Exception as e:
         log_event('Order', 'Error', f"Failed to create {client_ref}: {str(e)}")
         return False, str(e)
+
+# --- HELPERS FOR MANUAL SYNC ---
+def check_odoo_order_status(shopify_name):
+    """
+    Checks if order exists in Odoo.
+    Checks both 'ONLINE_#1001' (Our App) and '#1001' (Techmarbles/Others).
+    """
+    client_ref_our = f"ONLINE_{shopify_name}"
+    client_ref_tech = shopify_name
+    
+    # Search for EITHER format
+    domain = ['|', ('client_order_ref', '=', client_ref_our), ('client_order_ref', '=', client_ref_tech)]
+    
+    try:
+        existing = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'sale.order', 'search_read', [domain], {'fields': ['name', 'client_order_ref', 'state']})
+        
+        if not existing:
+            return "Not Synced"
+        
+        for order in existing:
+            ref = order.get('client_order_ref', '')
+            if ref == client_ref_our:
+                return f"Synced (Our App)"
+            if ref == client_ref_tech:
+                return f"Synced (Techmarbles)"
+                
+        return "Synced (Unknown)"
+    except:
+        return "Check Failed"
 
 # --- ROUTES ---
 
@@ -199,29 +213,59 @@ def simulate_order():
     except Exception as e:
         return jsonify({"message": f"Test Failed: {str(e)}"}), 500
 
-# --- MANUAL TRIGGER: SYNC RECENT ORDERS ---
+# --- UPDATED: MANUAL TRIGGER (FETCH ONLY) ---
 @app.route('/sync/orders/manual', methods=['GET'])
-def manual_order_sync():
-    # Fetch last 5 open orders from Shopify
-    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=5"
+def manual_order_fetch():
+    # Fetch last 10 orders (any status)
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=any&limit=10"
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     
     res = requests.get(url, headers=headers)
     if res.status_code != 200:
-        return jsonify({"message": f"Failed to fetch from Shopify: {res.status_code}"}), 500
+        return jsonify({"error": f"Failed to fetch from Shopify: {res.status_code}"}), 500
     
-    orders = res.json().get('orders', [])
-    synced_count = 0
-    skipped_count = 0
-    
-    for order in orders:
-        success, msg = process_order_data(order)
-        if success and "already exists" not in msg:
-            synced_count += 1
-        else:
-            skipped_count += 1
+    orders_data = []
+    for order in res.json().get('orders', []):
+        # Check Odoo for duplicate status before returning
+        status = check_odoo_order_status(order['name'])
         
-    return jsonify({"message": f"Manual Sync: Processed {len(orders)}. Synced: {synced_count}, Skipped: {skipped_count}"})
+        orders_data.append({
+            'id': order['id'],
+            'name': order['name'],
+            'date': order['created_at'],
+            'total': order['total_price'],
+            'email': order.get('email', 'No Email'),
+            'odoo_status': status
+        })
+        
+    # Return JSON list for Frontend to display in a modal/list
+    return jsonify({"orders": orders_data})
+
+# --- NEW: BATCH IMPORT ENDPOINT ---
+@app.route('/sync/orders/import_batch', methods=['POST'])
+def import_selected_orders():
+    selected_ids = request.json.get('order_ids', [])
+    if not selected_ids:
+        return jsonify({"message": "No orders selected"}), 400
+        
+    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+    synced = 0
+    errors = 0
+    
+    for order_id in selected_ids:
+        # Fetch full order details
+        url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{order_id}.json"
+        res = requests.get(url, headers=headers)
+        
+        if res.status_code == 200:
+            order_data = res.json().get('order')
+            success, msg = process_order_data(order_data)
+            if success: 
+                synced += 1
+            else:
+                errors += 1
+                
+    return jsonify({"message": f"Batch Complete. Synced: {synced}, Errors/Skipped: {errors}"})
 
 # --- WEBHOOKS ---
 @app.route('/webhook/orders', methods=['POST'])
