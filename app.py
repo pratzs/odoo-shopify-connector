@@ -1,11 +1,28 @@
 import os
+import sys
+
+# DEBUG: Print startup status to logs
+print("STEP 1: Starting App imports...", file=sys.stderr)
+
 import hmac
 import hashlib
 import base64
 import json
 from flask import Flask, request, jsonify, render_template
+
+print("STEP 2: Flask imported. Importing Models...", file=sys.stderr)
 from models import db, ProductMap, SyncLog, AppSetting
-from odoo_client import OdooClient
+
+print("STEP 3: Models imported. Importing OdooClient...", file=sys.stderr)
+try:
+    from odoo_client import OdooClient
+except ImportError as e:
+    print(f"CRITICAL ERROR: Could not import OdooClient. Check odoo_client.py for syntax errors. Details: {e}", file=sys.stderr)
+    OdooClient = None
+except Exception as e:
+    print(f"CRITICAL ERROR: Error in odoo_client.py: {e}", file=sys.stderr)
+    OdooClient = None
+
 import requests
 from datetime import datetime, timedelta
 import random
@@ -13,16 +30,20 @@ import random
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
+print("STEP 4: Configuring Database...", file=sys.stderr)
+
 # FIX: Handle Supabase connection string for pg8000 driver
-database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
+database_url = os.getenv('DATABASE_URL')
 
 if database_url:
-    # If it starts with postgres://, change to postgresql+pg8000://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
-    # If it starts with postgresql://, change to postgresql+pg8000://
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
+else:
+    # Fallback for local testing/safety
+    print("WARNING: No DATABASE_URL found. Using local sqlite.", file=sys.stderr)
+    database_url = 'sqlite:///local.db'
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -33,19 +54,27 @@ db.init_app(app)
 
 # Initialize Odoo
 odoo = None
-try:
-    odoo = OdooClient(
-        url=os.getenv('ODOO_URL'),
-        db=os.getenv('ODOO_DB'),
-        username=os.getenv('ODOO_USERNAME'),
-        password=os.getenv('ODOO_PASSWORD')
-    )
-except Exception as e:
-    print(f"Odoo Startup Error: {e}")
+print("STEP 5: Initializing Odoo Connection...", file=sys.stderr)
+if OdooClient:
+    try:
+        odoo = OdooClient(
+            url=os.getenv('ODOO_URL'),
+            db=os.getenv('ODOO_DB'),
+            username=os.getenv('ODOO_USERNAME'),
+            password=os.getenv('ODOO_PASSWORD')
+        )
+    except Exception as e:
+        print(f"Odoo Startup Error (App will run in Offline Mode): {e}", file=sys.stderr)
+else:
+    print("Odoo Client class not available. App running in restricted mode.", file=sys.stderr)
 
+print("STEP 6: Creating Database Tables...", file=sys.stderr)
 with app.app_context():
     try: db.create_all()
-    except: pass
+    except Exception as e: 
+        print(f"DB Creation Error (Check DATABASE_URL credentials): {e}", file=sys.stderr)
+
+print("STEP 7: App Startup Complete. Ready to serve.", file=sys.stderr)
 
 # --- HELPERS ---
 def get_config(key, default=None):
@@ -92,6 +121,8 @@ def log_event(entity, status, message):
 
 def process_order_data(data):
     """Core logic to sync a single order"""
+    if not odoo: return False, "Odoo Offline"
+
     email = data.get('email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
