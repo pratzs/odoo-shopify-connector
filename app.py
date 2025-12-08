@@ -96,6 +96,9 @@ def process_order_data(data):
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
+    # Load Company ID from Settings
+    company_id = get_config('odoo_company_id')
+    
     # 1. Check if Order Exists (Prevent Resend)
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -121,7 +124,9 @@ def process_order_data(data):
     for item in data.get('line_items', []):
         sku = item.get('sku')
         if not sku: continue
-        product_id = odoo.search_product_by_sku(sku)
+        
+        # Pass company_id to enforce selection from correct company
+        product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
             price = float(item.get('price', 0))
@@ -134,7 +139,7 @@ def process_order_data(data):
                 'price_unit': price, 'name': item['name'], 'discount': pct
             }))
         else:
-            log_event('Product', 'Warning', f"SKU {sku} not found")
+            log_event('Product', 'Warning', f"SKU {sku} not found in Company {company_id or 'All'}")
 
     # Shipping (Match by Name)
     for ship in data.get('shipping_lines', []):
@@ -142,7 +147,7 @@ def process_order_data(data):
         title = ship.get('title', 'Shipping')
         
         # Try finding exact name, then fallback to generic
-        ship_pid = odoo.search_product_by_name(title) or odoo.search_product_by_name("Shipping")
+        ship_pid = odoo.search_product_by_name(title, company_id) or odoo.search_product_by_name("Shipping", company_id)
         
         if cost >= 0 and ship_pid:
             lines.append((0, 0, {
@@ -164,12 +169,17 @@ def process_order_data(data):
     if gateways: notes.append(f"Payment: {', '.join(gateways)}")
     
     try:
-        odoo.create_sale_order({
+        order_vals = {
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
             'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
             'note': "\n\n".join(notes)
-        })
+        }
+        
+        if company_id:
+             order_vals['company_id'] = int(company_id)
+
+        odoo.create_sale_order(order_vals)
         log_event('Order', 'Success', f"Synced {client_ref}")
         return True, "Synced"
     except Exception as e:
@@ -232,19 +242,6 @@ def api_save_settings():
     set_config('odoo_company_id', data.get('company_id'))
     return jsonify({"message": "Settings Saved"})
 
-@app.route('/test/simulate_order', methods=['POST'])
-def simulate_order():
-    if not odoo: return jsonify({"message": "Odoo Offline"}), 500
-    try:
-        test_email = os.getenv('ODOO_USERNAME') 
-        partner = odoo.search_partner_by_email(test_email)
-        status = 'Success' if partner else 'Warning'
-        msg = f"Connection Test: Found Admin ID {partner['id']}" if partner else "Connection Test: Admin email not found"
-        log_event('Test Connection', status, msg)
-        return jsonify({"message": msg})
-    except Exception as e:
-        return jsonify({"message": f"Test Failed: {str(e)}"}), 500
-
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory():
     if not odoo: return jsonify({"error": "Offline"}), 500
@@ -256,9 +253,12 @@ def sync_inventory():
     target_locations = get_config('inventory_locations', default_locs)
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
+    company_id = get_config('odoo_company_id', None) # Get Company ID
 
     last_run = datetime.utcnow() - timedelta(minutes=35)
-    try: product_ids = odoo.get_changed_products(str(last_run))
+    try: 
+        # Pass Company ID to get_changed_products to filter inventory source
+        product_ids = odoo.get_changed_products(str(last_run), company_id)
     except: return jsonify({"error": "Read Failed"}), 500
     
     count = 0
@@ -328,6 +328,10 @@ def refund_webhook():
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
     log_event('Refund', 'Info', "Refund webhook received")
     return "Received", 200
+
+@app.route('/test/simulate_order', methods=['POST'])
+def test_sim_dummy():
+     return jsonify({})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
