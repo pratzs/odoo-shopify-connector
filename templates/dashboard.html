@@ -174,9 +174,50 @@
                             </div>
                         </div>
 
+                        <!-- Customer Sync Settings -->
+                        <div class="mb-4">
+                            <label class="form-label fw-bold">4. Customer Sync Settings</label>
+                            <div class="card bg-light border-0">
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-bold">Customer Sync Direction</label>
+                                        <select class="form-select" id="custSyncDirection">
+                                            <option value="bidirectional" selected>Bidirectional (Odoo Master)</option>
+                                            <option value="odoo_to_shopify">Odoo → Shopify</option>
+                                            <option value="shopify_to_odoo">Shopify → Odoo</option>
+                                        </select>
+                                        <div class="form-text">Controls how customer data flows. Bidirectional treats Odoo as the source of truth.</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-bold">Customer Sync Option</label>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="custSyncOption" id="custCreateUpdate" value="create_update" checked>
+                                            <label class="form-check-label" for="custCreateUpdate">Create new and update existing customers</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="custSyncOption" id="custUpdateOnly" value="update_only">
+                                            <label class="form-check-label" for="custUpdateOnly">Only update existing customers</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="custAutoSync">
+                                        <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync</label>
+                                        <div class="form-text">Automatically sync customers from Odoo to Shopify once daily.</div>
+                                    </div>
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="custSyncTags">
+                                        <label class="form-check-label fw-bold" for="custSyncTags">Sync Customer Tags</label>
+                                        <div class="form-text">Select specific customer tags to sync. Leave disabled to sync all.</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Location Mapping -->
                         <div class="mb-4">
-                            <label class="form-label fw-bold">4. Location Mapping</label>
+                            <label class="form-label fw-bold">5. Location Mapping</label>
                             <div class="mapping-box d-flex align-items-center justify-content-between">
                                 <div class="border rounded p-2 bg-white flex-grow-1 text-center">
                                     <strong>Shopify:</strong> VJ Trading Warehouse
@@ -268,11 +309,20 @@
                 const utc = el.getAttribute('data-utc');
                 if(utc) el.innerText = formatNZT(utc);
             });
-            // Apply saved settings
+            // Apply saved settings to inputs
             if (SAVED_SETTINGS) {
                 if (SAVED_SETTINGS.field) document.getElementById('invType').value = SAVED_SETTINGS.field;
                 if (SAVED_SETTINGS.sync_zero !== undefined) document.getElementById('checkZeroStock').checked = SAVED_SETTINGS.sync_zero;
                 if (SAVED_SETTINGS.combine_committed !== undefined) document.getElementById('checkCommitted').checked = SAVED_SETTINGS.combine_committed;
+                
+                // Customer Settings
+                if (SAVED_SETTINGS.cust_direction) document.getElementById('custSyncDirection').value = SAVED_SETTINGS.cust_direction;
+                if (SAVED_SETTINGS.cust_option) {
+                    const opt = document.querySelector(`input[name="custSyncOption"][value="${SAVED_SETTINGS.cust_option}"]`);
+                    if(opt) opt.checked = true;
+                }
+                if (SAVED_SETTINGS.cust_auto_sync !== undefined) document.getElementById('custAutoSync').checked = SAVED_SETTINGS.cust_auto_sync;
+                if (SAVED_SETTINGS.cust_sync_tags !== undefined) document.getElementById('custSyncTags').checked = SAVED_SETTINGS.cust_sync_tags;
             }
         });
 
@@ -331,17 +381,28 @@
 
         function saveSettings() {
             const companyId = document.getElementById('companySelect').value;
-            const field = document.getElementById('invType').value;
+            const field = document.querySelector('input[name="invType"]:checked').value;
             const syncZero = document.getElementById('checkZeroStock').checked;
             const combineCommitted = document.getElementById('checkCommitted').checked;
             const locations = Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value));
+            
+            // Customer Settings
+            const custDirection = document.getElementById('custSyncDirection').value;
+            const custOption = document.querySelector('input[name="custSyncOption"]:checked').value;
+            const custAutoSync = document.getElementById('custAutoSync').checked;
+            const custSyncTags = document.getElementById('custSyncTags').checked;
             
             if (!companyId) { alert("Please select a Company first."); return; }
 
             fetch('/api/settings/save', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ company_id: companyId, field, locations, sync_zero: syncZero, combine_committed: combineCommitted })
+                body: JSON.stringify({ 
+                    company_id: companyId, 
+                    field, locations, sync_zero: syncZero, combine_committed: combineCommitted,
+                    cust_direction: custDirection, cust_option: custOption, 
+                    cust_auto_sync: custAutoSync, cust_sync_tags: custSyncTags
+                })
             })
             .then(r => r.json())
             .then(data => showToast("Configuration Saved!"))
