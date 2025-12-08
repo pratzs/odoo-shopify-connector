@@ -148,6 +148,41 @@ def create_product_in_odoo(sku, name, price, barcode=None):
         add_dashboard_log('products', 'Error', f"Failed to create product in Odoo: {e}")
         return None
 
+# --- SHOPIFY HELPER FUNCTIONS (GraphQL) ---
+
+def find_shopify_product_by_sku(sku):
+    """
+    Finds a Shopify Product ID by SKU using GraphQL.
+    Crucial for preventing duplicates because REST API doesn't support SKU filtering on Products.
+    """
+    query = """
+    {
+      productVariants(first: 1, query: "sku:%s") {
+        edges {
+          node {
+            product {
+              legacyResourceId
+            }
+          }
+        }
+      }
+    }
+    """ % sku
+    
+    try:
+        client = shopify.GraphQL()
+        result = client.execute(query)
+        data = json.loads(result)
+        edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
+        if edges:
+            # Return the Numeric ID (REST ID) of the parent product
+            return edges[0]['node']['product']['legacyResourceId']
+    except Exception as e:
+        # Don't crash the sync, just log it
+        logging.error(f"GraphQL SKU search error for {sku}: {e}")
+        
+    return None
+
 # --- SYNC LOGIC: PRODUCTS ---
 
 def sync_odoo_products_to_shopify():
@@ -161,7 +196,6 @@ def sync_odoo_products_to_shopify():
     try:
         db, uid, password, models = get_odoo_connection()
         
-        # FIXED: Updated variable names to match Render Environment
         shop_url = os.environ.get('SHOPIFY_URL')
         access_token = os.environ.get('SHOPIFY_TOKEN')
         
@@ -172,6 +206,7 @@ def sync_odoo_products_to_shopify():
         session = shopify.Session(shop_url, '2024-01', access_token)
         shopify.ShopifyResource.activate_session(session)
 
+        # Get modified products from Odoo
         ids = models.execute_kw(db, uid, password, 'product.product', 'search', 
             [[('active', '=', True)]], 
             {'limit': 20, 'order': 'write_date desc'}
@@ -183,9 +218,31 @@ def sync_odoo_products_to_shopify():
         for p in products:
             sku = p.get('default_code')
             if not sku: continue
-                
-            shopify_products = shopify.Product.find(title=p['name'])
             
+            # --- DEDUPLICATION LOGIC ---
+            # 1. Search by SKU (Reliable)
+            shopify_product_id = find_shopify_product_by_sku(sku)
+            
+            sp = None
+            if shopify_product_id:
+                try:
+                    sp = shopify.Product.find(shopify_product_id)
+                except Exception as e:
+                    logging.warning(f"Found ID {shopify_product_id} by SKU but failed to fetch product: {e}")
+                    sp = None
+            
+            # 2. (Optional) Search by Title as fallback ONLY if SKU search returned nothing
+            # This is risky but useful if you are initializing products that have no SKU in Shopify yet.
+            # Commented out to be safe and avoid duplicates as per your request.
+            # if not sp:
+            #     found_by_title = shopify.Product.find(title=p['name'])
+            #     if found_by_title: sp = found_by_title[0]
+
+            # 3. If still not found, Create New
+            if not sp:
+                 sp = shopify.Product()
+
+            # --- MAPPING LOGIC ---
             category_name = p['categ_id'][1] if p['categ_id'] else "Uncategorized"
             tags = []
             if p.get('product_tag_ids'):
@@ -199,18 +256,13 @@ def sync_odoo_products_to_shopify():
                     vendor_code = seller[0]['product_code']
             
             product_data = {
-                'title': p['name'],
+                'title': p['name'] or 'Unknown Product', # Prevent False/None
                 'body_html': p.get('description_sale') or '',
                 'product_type': category_name,
                 'vendor': 'Odoo Master',
                 'tags': ",".join(tags),
                 'status': 'active',
             }
-
-            if shopify_products:
-                sp = shopify_products[0]
-            else:
-                sp = shopify.Product()
 
             sp.title = product_data['title']
             sp.body_html = product_data['body_html']
@@ -227,14 +279,22 @@ def sync_odoo_products_to_shopify():
             
             if success:
                 synced_count += 1
+                
+                # Update Variant SKU/Barcode/Price/Cost
                 variant = None
+                
+                # Check if we can find the variant matching our SKU in the saved product
+                # (Important if the product has multiple variants)
                 for v in sp.variants:
                     if v.sku == sku:
                         variant = v
                         break
                 
-                if not variant:
+                # If no variant matches SKU (e.g. new product or SKU changed), use the first one
+                if not variant and sp.variants:
                     variant = sp.variants[0]
+
+                if variant:
                     variant.sku = sku
                     variant.barcode = p.get('barcode') or ''
                     variant.price = str(p['list_price'])
@@ -242,11 +302,12 @@ def sync_odoo_products_to_shopify():
                     variant.inventory_policy = 'deny'
                     variant.save()
 
-                if variant:
-                    inv_item = shopify.InventoryItem.find(variant.inventory_item_id)
-                    inv_item.cost = p['standard_price'] 
-                    inv_item.tracked = True
-                    inv_item.save()
+                    # Update Inventory Cost (Cost Price)
+                    if variant.inventory_item_id:
+                        inv_item = shopify.InventoryItem.find(variant.inventory_item_id)
+                        inv_item.cost = p['standard_price'] 
+                        inv_item.tracked = True
+                        inv_item.save()
                     
                 if vendor_code:
                     metafield = shopify.Metafield({
