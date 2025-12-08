@@ -86,7 +86,12 @@
                         <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary">
                             <i class="bi bi-box-seam"></i> Force Inventory Sync
                         </button>
-                        <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info">
+                        <!-- NEW BUTTON: Manual Product Sync -->
+                        <button onclick="triggerAction('/manual_sync_products', 'POST')" class="btn btn-info text-white">
+                            <i class="bi bi-arrow-repeat"></i> Sync Products (Odoo→Shopify)
+                        </button>
+                        
+                        <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-dark ms-auto">
                             <i class="bi bi-lightning"></i> Test Connection
                         </button>
                     </div>
@@ -215,9 +220,30 @@
                             </div>
                         </div>
 
+                        <!-- NEW: Product Sync Settings -->
+                        <div class="mb-4">
+                            <label class="form-label fw-bold">5. Product Sync Settings</label>
+                            <div class="card bg-light border-0">
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <label class="form-label small fw-bold">Product Sync Direction</label>
+                                        <select class="form-select" id="productSyncDirection">
+                                            <option value="bidirectional" {% if current_settings.product_sync_direction == 'bidirectional' %}selected{% endif %}>Bidirectional (Merge)</option>
+                                            <option value="shopify_to_odoo" {% if current_settings.product_sync_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify to Odoo (Create Missing in Odoo)</option>
+                                            <option value="odoo_to_shopify" {% if current_settings.product_sync_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo to Shopify (Master)</option>
+                                        </select>
+                                        <div class="form-text">
+                                            <small class="d-block mb-1"><strong>Bidirectional/Shopify-to-Odoo:</strong> Incoming orders with unknown SKUs will create products in Odoo (Category: PRODUCT BU, UoM: Unit).</small>
+                                            <small class="d-block"><strong>Bidirectional/Odoo-to-Shopify:</strong> Products created/updated in Odoo sync to Shopify every 30 mins (incl. Images, Cost, Vendor Code).</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Location Mapping -->
                         <div class="mb-4">
-                            <label class="form-label fw-bold">5. Location Mapping</label>
+                            <label class="form-label fw-bold">6. Location Mapping</label>
                             <div class="mapping-box d-flex align-items-center justify-content-between">
                                 <div class="border rounded p-2 bg-white flex-grow-1 text-center">
                                     <strong>Shopify:</strong> VJ Trading Warehouse
@@ -379,6 +405,9 @@
             const custAutoSync = document.getElementById('custAutoSync').checked;
             const custSyncTags = document.getElementById('custSyncTags').checked;
             
+            // Product Settings (NEW)
+            const productSyncDirection = document.getElementById('productSyncDirection').value;
+            
             if (!companyId) { alert("Please select a Company first."); return; }
 
             fetch('/api/settings/save', {
@@ -388,7 +417,8 @@
                     company_id: companyId, 
                     field, locations, sync_zero: syncZero, combine_committed: combineCommitted,
                     cust_direction: custDirection, cust_option: custOption, 
-                    cust_auto_sync: custAutoSync, cust_sync_tags: custSyncTags
+                    cust_auto_sync: custAutoSync, cust_sync_tags: custSyncTags,
+                    product_sync_direction: productSyncDirection // Send to backend
                 })
             })
             .then(r => r.json())
