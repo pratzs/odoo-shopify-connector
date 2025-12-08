@@ -24,22 +24,47 @@ class OdooClient:
             return partners[0]
         return None
 
-    def search_product_by_sku(self, sku):
-        """Finds product ID by Internal Reference"""
+    def search_product_by_sku(self, sku, company_id=None):
+        """
+        Finds product ID by Internal Reference (SKU).
+        If company_id is provided, checks for products in that company OR shared products (False).
+        """
+        domain = [['default_code', '=', sku]]
+        if company_id:
+            domain.insert(0, '|') # OR operator
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False]) # Shared products
+
         ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'product.product', 'search', [[['default_code', '=', sku]]])
+            'product.product', 'search', [domain])
         return ids[0] if ids else None
 
-    def search_product_by_name(self, name):
-        """Finds product ID by Name (Useful for Shipping Methods)"""
-        # Case insensitive search ('ilike')
+    def search_product_by_name(self, name, company_id=None):
+        """
+        Finds product ID by Name (Useful for Shipping Methods).
+        If company_id is provided, filters by company.
+        """
+        domain = [['name', 'ilike', name]]
+        if company_id:
+            domain.insert(0, '|') # OR operator
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False])
+
         ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'product.product', 'search', [[['name', 'ilike', name]]])
+            'product.product', 'search', [domain])
         return ids[0] if ids else None
 
-    def get_changed_products(self, time_limit_str):
-        """Finds IDs of products changed recently."""
+    def get_changed_products(self, time_limit_str, company_id=None):
+        """
+        Finds IDs of products changed recently.
+        Used by the sync job to know which products to check.
+        """
         domain = [('write_date', '>', time_limit_str), ('type', '=', 'product')]
+        if company_id:
+            domain.insert(0, '|')
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False])
+
         return self.models.execute_kw(self.db, self.uid, self.password,
             'product.product', 'search', [domain])
 
@@ -51,8 +76,8 @@ class OdooClient:
 
     def get_locations(self, company_id=None):
         """
-        SAFETY UPDATE: Only fetches locations if a Company ID is provided.
-        Prevents crashing the server by loading thousands of locations at once.
+        Fetches internal locations.
+        If company_id is provided, filters locations to that specific company.
         """
         if not company_id:
             return [] # Return empty if no company selected to save memory
@@ -66,8 +91,8 @@ class OdooClient:
 
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
         """
-        Calculates total stock. 
-        field_name can be 'qty_available' (On Hand) or 'virtual_available' (Forecasted/Free)
+        Calculates total stock for a product across multiple Odoo locations.
+        field_name can be 'qty_available' (On Hand) or 'virtual_available' (Forecasted).
         """
         total_qty = 0
         for loc_id in location_ids:
