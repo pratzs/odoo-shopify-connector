@@ -24,7 +24,6 @@ class SyncLog(db.Model):
     status = db.Column(db.String(20)) 
     message = db.Column(db.Text)
 
-# THIS WAS MISSING AND CAUSED THE CRASH
 class AppSetting(db.Model):
     __tablename__ = 'app_settings'
     key = db.Column(db.String(50), primary_key=True)
