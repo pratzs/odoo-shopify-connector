@@ -9,7 +9,6 @@ from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 import random
-import time
 
 app = Flask(__name__)
 
@@ -28,31 +27,21 @@ SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
 db.init_app(app)
 
-# Global Odoo Instance (Lazy Loaded)
-_odoo_instance = None
+# Initialize Odoo
+odoo = None
+try:
+    odoo = OdooClient(
+        url=os.getenv('ODOO_URL'),
+        db=os.getenv('ODOO_DB'),
+        username=os.getenv('ODOO_USERNAME'),
+        password=os.getenv('ODOO_PASSWORD')
+    )
+except Exception as e:
+    print(f"Odoo Startup Error: {e}")
 
-def get_odoo():
-    """Connects to Odoo only when needed, preventing startup crashes"""
-    global _odoo_instance
-    if _odoo_instance:
-        return _odoo_instance
-    
-    try:
-        _odoo_instance = OdooClient(
-            url=os.getenv('ODOO_URL'),
-            db=os.getenv('ODOO_DB'),
-            username=os.getenv('ODOO_USERNAME'),
-            password=os.getenv('ODOO_PASSWORD')
-        )
-        return _odoo_instance
-    except Exception as e:
-        print(f"Odoo Connection Failed: {e}")
-        return None
-
-# Initialize DB (Safe Mode)
 with app.app_context():
     try: db.create_all()
-    except Exception as e: print(f"DB Init Warning: {e}")
+    except: pass
 
 # --- HELPERS ---
 def get_config(key, default=None):
@@ -88,9 +77,6 @@ def log_event(entity, status, message):
     except Exception as e: print(f"DB LOG ERROR: {e}")
 
 def process_order_data(data):
-    odoo = get_odoo()
-    if not odoo: return False, "Odoo Offline"
-
     email = data.get('email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
@@ -119,6 +105,8 @@ def process_order_data(data):
             discount = float(item.get('total_discount', 0))
             pct = (discount / (price * qty)) * 100 if price > 0 else 0.0
             lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}))
+        else:
+            log_event('Product', 'Warning', f"SKU {item.get('sku')} not found")
 
     for ship in data.get('shipping_lines', []):
         ship_pid = odoo.search_product_by_name(ship.get('title')) or odoo.search_product_by_name("Shipping")
@@ -165,7 +153,6 @@ def dashboard():
         "company_id": get_config('odoo_company_id', None)
     }
 
-    odoo = get_odoo()
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
                            logs_orders=logs_orders, logs_inventory=logs_inventory, 
@@ -174,14 +161,12 @@ def dashboard():
 
 @app.route('/api/odoo/companies', methods=['GET'])
 def api_get_companies():
-    odoo = get_odoo()
     if not odoo: return jsonify({"error": "Odoo Offline"}), 500
     try: return jsonify(odoo.get_companies())
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/odoo/locations', methods=['GET'])
 def api_get_locations():
-    odoo = get_odoo()
     if not odoo: return jsonify({"error": "Odoo Offline"}), 500
     try:
         company_id = request.args.get('company_id')
@@ -202,10 +187,9 @@ def api_save_settings():
 
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory():
-    odoo = get_odoo()
     if not odoo: return jsonify({"error": "Offline"}), 500
     
-    # Load Settings
+    # Load Settings from DB
     env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
@@ -240,14 +224,12 @@ def manual_order_fetch():
     orders = res.json().get('orders', []) if res.status_code == 200 else []
     
     mapped_orders = []
-    odoo = get_odoo()
     for o in orders:
         status = "Not Synced"
-        if odoo:
-            try:
-                exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', 'ilike', o['name']]]])
-                if exists: status = "Synced"
-            except: pass
+        try:
+            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', 'ilike', o['name']]]])
+            if exists: status = "Synced"
+        except: pass
         mapped_orders.append({'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status})
     return jsonify({"orders": mapped_orders})
 
@@ -263,7 +245,9 @@ def import_selected_orders():
             if success: synced += 1
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
+# THIS IS THE MISSING ROUTE FROM YOUR LOGS
 @app.route('/webhook/orders', methods=['POST'])
+@app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
     process_order_data(request.json)
@@ -272,10 +256,6 @@ def order_webhook():
 @app.route('/webhook/orders/cancelled', methods=['POST'])
 def order_cancelled_webhook():
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    
-    odoo = get_odoo()
-    if not odoo: return "Offline", 500
-
     data = request.json
     client_ref = f"ONLINE_{data.get('name')}"
     order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref], ['state', '!=', 'cancel']]])
