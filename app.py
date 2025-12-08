@@ -167,7 +167,7 @@ def process_order_data(data):
         # Improved Name Logic: Fallback to Company Name if names missing
         s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip()
         if not s_name: s_name = ship_addr.get('name', '')
-        if not s_name: s_name = partner['name']
+        if not s_name: s_name = partner.get('name', 'Delivery Address')
 
         shipping_data = {
             'name': s_name,
@@ -194,7 +194,7 @@ def process_order_data(data):
     if bill_addr:
         b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip()
         if not b_name: b_name = bill_addr.get('name', '')
-        if not b_name: b_name = partner['name']
+        if not b_name: b_name = partner.get('name', 'Invoice Address')
         
         billing_data = {
             'name': b_name,
