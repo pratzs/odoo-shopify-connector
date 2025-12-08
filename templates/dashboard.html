@@ -13,6 +13,7 @@
         .nav-tabs .nav-link.active { font-weight: bold; }
         .table-sm td, .table-sm th { font-size: 0.9rem; vertical-align: middle; }
         .mapping-box { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 15px; }
+        .location-tag { background: #e9ecef; border: 1px solid #ced4da; border-radius: 4px; padding: 2px 8px; margin: 2px; display: inline-block; font-size: 0.85em; }
     </style>
 </head>
 <body>
@@ -136,27 +137,39 @@
                         </div>
 
                         <!-- Quantity & Sync Rules -->
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
-                                <label class="form-label fw-bold">2. Quantity Type</label>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="invType" id="qtyAvailable" value="qty_available" {% if current_settings.field == 'qty_available' %}checked{% endif %}>
-                                    <label class="form-check-label" for="qtyAvailable">Quantity On Hand (Physical)</label>
+                        <div class="card mb-4 bg-light border-0">
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">2. Quantity Type</label>
+                                        <select class="form-select" id="invType">
+                                            <option value="qty_available" {% if current_settings.field == 'qty_available' %}selected{% endif %}>Quantity On Hand (Physical)</option>
+                                            <option value="virtual_available" {% if current_settings.field == 'virtual_available' %}selected{% endif %}>Quantity Available (Forecasted)</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label fw-bold">3. Auto-Sync Frequency</label>
+                                        <select class="form-select" id="syncFreq" disabled>
+                                            <option selected>Every 30 Minutes</option>
+                                        </select>
+                                        <div class="form-text text-muted">Controlled by external Cron job.</div>
+                                    </div>
                                 </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="invType" id="virtualAvailable" value="virtual_available" {% if current_settings.field == 'virtual_available' %}checked{% endif %}>
-                                    <label class="form-check-label" for="virtualAvailable">Forecasted Quantity (Virtual)</label>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label fw-bold">3. Sync Rules</label>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
-                                    <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
-                                </div>
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
-                                    <label class="form-check-label" for="checkCommitted">Combine Odoo available + Shopify committed</label>
+                                <div class="mt-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
+                                        <label class="form-check-label" for="checkZeroStock">
+                                            <strong>Do not sync zero stock</strong><br>
+                                            <span class="text-muted small">When checked, products with 0 stock will be skipped. Uncheck to sync 0 stock updates.</span>
+                                        </label>
+                                    </div>
+                                    <div class="form-check mt-2">
+                                        <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
+                                        <label class="form-check-label" for="checkCommitted">
+                                            <strong>Combine Odoo available + Shopify committed</strong><br>
+                                            <span class="text-muted small">Adds Shopify's committed stock to Odoo's available quantity before syncing.</span>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -309,7 +322,7 @@
                         return `
                             <div class="form-check">
                                 <input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}>
-                                <label class="form-check-label" for="loc_${loc.id}">${loc.complete_name}</label>
+                                <label class="form-check-label" for="loc_${loc.id}">${displayName}</label>
                             </div>`;
                     });
                     list.innerHTML = items.join('');
@@ -318,7 +331,7 @@
 
         function saveSettings() {
             const companyId = document.getElementById('companySelect').value;
-            const field = document.querySelector('input[name="invType"]:checked').value;
+            const field = document.getElementById('invType').value;
             const syncZero = document.getElementById('checkZeroStock').checked;
             const combineCommitted = document.getElementById('checkCommitted').checked;
             const locations = Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value));
@@ -335,7 +348,7 @@
             .catch(err => showToast("Save Failed"));
         }
 
-        // --- Manual Import Logic (Same as before) ---
+        // --- Manual Import Logic ---
         function openOrderImportModal() {
             modal.show();
             document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
