@@ -43,21 +43,36 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password,
             'product.product', 'search', [domain])
 
-    def get_total_qty_for_locations(self, product_id, location_ids):
-        """Calculates total stock for a product across multiple Odoo locations."""
+    def get_locations(self):
+        """Fetches all internal locations for the settings dropdown"""
+        # We filter for usage='internal' to avoid showing Customer/Vendor locations
+        return self.models.execute_kw(self.db, self.uid, self.password,
+            'stock.location', 'search_read', [[['usage', '=', 'internal']]], 
+            {'fields': ['id', 'complete_name']})
+
+    def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
+        """
+        Calculates total stock. 
+        field_name can be 'qty_available' (On Hand) or 'virtual_available' (Forecasted/Free)
+        """
         total_qty = 0
         for loc_id in location_ids:
             context = {'location': loc_id}
             data = self.models.execute_kw(self.db, self.uid, self.password,
                 'product.product', 'read', [product_id],
-                {'fields': ['qty_available'], 'context': context})
-            
+                {'fields': [field_name], 'context': context})
             if data:
-                qty = data[0].get('qty_available', 0)
-                total_qty += qty
-                
+                total_qty += data[0].get(field_name, 0)
         return total_qty
 
     def create_sale_order(self, order_vals):
         """Creates the order in Odoo"""
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'create', [order_vals])
+
+    def update_sale_order(self, order_id, order_vals):
+        """Updates an existing order"""
+        return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'write', [[order_id], order_vals])
+
+    def post_message(self, order_id, message):
+        """Adds a note to the order chatter"""
+        return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'message_post', [order_id], {'body': message})
