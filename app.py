@@ -160,11 +160,13 @@ def sync_odoo_products_to_shopify():
 
     try:
         db, uid, password, models = get_odoo_connection()
-        shop_url = os.environ.get('SHOPIFY_SHOP_URL')
-        access_token = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+        
+        # FIXED: Updated variable names to match Render Environment
+        shop_url = os.environ.get('SHOPIFY_URL')
+        access_token = os.environ.get('SHOPIFY_TOKEN')
         
         if not (db and uid and shop_url and access_token):
-            add_dashboard_log('products', 'Error', 'Missing credentials.')
+            add_dashboard_log('products', 'Error', 'Missing credentials (SHOPIFY_URL or SHOPIFY_TOKEN).')
             return
 
         session = shopify.Session(shop_url, '2024-01', access_token)
@@ -283,8 +285,10 @@ def sync_customers():
 
     try:
         db, uid, password, models = get_odoo_connection()
-        shop_url = os.environ.get('SHOPIFY_SHOP_URL')
-        access_token = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+        
+        # FIXED: Updated variable names to match Render Environment
+        shop_url = os.environ.get('SHOPIFY_URL')
+        access_token = os.environ.get('SHOPIFY_TOKEN')
         
         if not (db and uid and shop_url and access_token): return
 
@@ -333,8 +337,10 @@ def sync_customers():
 def fetch_recent_shopify_orders():
     """Fetches recent orders from Shopify for the Manual Import Modal"""
     try:
-        shop_url = os.environ.get('SHOPIFY_SHOP_URL')
-        access_token = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+        # FIXED: Updated variable names to match Render Environment
+        shop_url = os.environ.get('SHOPIFY_URL')
+        access_token = os.environ.get('SHOPIFY_TOKEN')
+        
         session = shopify.Session(shop_url, '2024-01', access_token)
         shopify.ShopifyResource.activate_session(session)
 
@@ -365,8 +371,10 @@ def import_shopify_orders_to_odoo(order_ids):
     
     try:
         db, uid, password, models = get_odoo_connection()
-        shop_url = os.environ.get('SHOPIFY_SHOP_URL')
-        access_token = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+        
+        # FIXED: Updated variable names to match Render Environment
+        shop_url = os.environ.get('SHOPIFY_URL')
+        access_token = os.environ.get('SHOPIFY_TOKEN')
         
         session = shopify.Session(shop_url, '2024-01', access_token)
         shopify.ShopifyResource.activate_session(session)
