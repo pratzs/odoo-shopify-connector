@@ -52,8 +52,11 @@ def get_config(key, default=None):
     """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
     except:
         return default
 
@@ -161,10 +164,10 @@ def process_order_data(data):
     shipping_id = partner_id # Default to parent
     
     if ship_addr:
-        # Improved Name Logic: Fallback to "Delivery Address" if names missing
+        # Improved Name Logic: Fallback to Company Name if names missing
         s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip()
         if not s_name: s_name = ship_addr.get('name', '')
-        if not s_name: s_name = "Delivery Address"
+        if not s_name: s_name = partner['name']
 
         shipping_data = {
             'name': s_name,
@@ -191,7 +194,7 @@ def process_order_data(data):
     if bill_addr:
         b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip()
         if not b_name: b_name = bill_addr.get('name', '')
-        if not b_name: b_name = "Invoice Address"
+        if not b_name: b_name = partner['name']
         
         billing_data = {
             'name': b_name,
