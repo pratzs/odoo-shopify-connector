@@ -9,7 +9,6 @@ import json
 import base64
 from flask import Flask, request, render_template_string, redirect, url_for, flash
 
-    # Fix the incomplete line below
 # --- Configuration & Helpers ---
 
 def get_config(key, default=None):
@@ -17,7 +16,6 @@ def get_config(key, default=None):
     # This is a placeholder for the actual implementation
     return os.environ.get(key, default)
 
-        "locations": get_config('inventory_locations', default_locs),
 # --- Odoo Helpers ---
 
 def get_odoo_connection():
@@ -324,10 +322,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
-        "sync_zero": get_config('sync_zero_stock', False),
-        "combine_committed": get_config('combine_committed', False),
-        "company_id": get_config('odoo_company_id', None),
-        "cust_direction": get_config('cust_direction', 'bidirectional'),
-        "cust_auto_sync": get_config('cust_auto_sync', True)
-    }
