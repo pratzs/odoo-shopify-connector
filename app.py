@@ -99,6 +99,16 @@ def process_order_data(data):
     # Load Company ID from Settings to prevent cross-company errors
     company_id = get_config('odoo_company_id')
     
+    # FALLBACK: If no company configured, try to auto-detect from API User
+    if not company_id and odoo:
+        try:
+            user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
+            if user_info:
+                company_id = user_info[0]['company_id'][0] # [ID, Name]
+        except Exception as e:
+            print(f"DEBUG: Failed to auto-detect company: {e}")
+
     # 1. Check if Order Exists (Prevent Resend)
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -141,19 +151,33 @@ def process_order_data(data):
         else:
             log_event('Product', 'Warning', f"SKU {sku} not found in Company {company_id or 'All'}")
 
-    # Shipping (Match by Name)
+    # Shipping (Auto-Create if Missing)
     for ship in data.get('shipping_lines', []):
         cost = float(ship.get('price', 0))
         title = ship.get('title', 'Shipping')
         
-        # Try finding exact name, then fallback to generic
-        # Pass company_id to ensure we don't pick a shipping product from the wrong company
-        ship_pid = odoo.search_product_by_name(title, company_id) or odoo.search_product_by_name("Shipping", company_id)
+        # 1. Try to find existing
+        ship_pid = odoo.search_product_by_name(title, company_id)
         
+        # 2. If NOT found, create it!
+        if not ship_pid:
+            try:
+                print(f"DEBUG: Creating new shipping product '{title}'")
+                ship_pid = odoo.create_service_product(title, company_id)
+                # Ensure it's an integer ID
+                if isinstance(ship_pid, list): ship_pid = ship_pid[0]
+            except Exception as e:
+                print(f"ERROR creating shipping product: {e}")
+                # Last resort fallback if creation fails
+                ship_pid = odoo.search_product_by_name("Shipping", company_id)
+
         if cost >= 0 and ship_pid:
             lines.append((0, 0, {
-                'product_id': ship_pid, 'product_uom_qty': 1,
-                'price_unit': cost, 'name': title, 'is_delivery': True
+                'product_id': ship_pid, 
+                'product_uom_qty': 1, 
+                'price_unit': cost, 
+                'name': title, 
+                'is_delivery': True
             }))
 
     if not lines: return False, "No valid lines"
@@ -177,7 +201,7 @@ def process_order_data(data):
             'note': "\n\n".join(notes)
         }
         
-        # Explicitly set the company_id on the order if configured
+        # Explicitly set the company_id on the order if configured or detected
         if company_id:
              order_vals['company_id'] = int(company_id)
 
@@ -256,6 +280,13 @@ def sync_inventory():
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
     company_id = get_config('odoo_company_id', None) # Get Company ID
+    
+    # Auto-detect company if missing for inventory too
+    if not company_id:
+        try:
+            user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
+            if user_info: company_id = user_info[0]['company_id'][0]
+        except: pass
 
     last_run = datetime.utcnow() - timedelta(minutes=35)
     try: 
