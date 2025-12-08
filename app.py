@@ -1,28 +1,11 @@
 import os
-import sys
-
-# DEBUG: Print startup status to logs
-print("STEP 1: Starting App imports...", file=sys.stderr)
-
 import hmac
 import hashlib
 import base64
 import json
 from flask import Flask, request, jsonify, render_template
-
-print("STEP 2: Flask imported. Importing Models...", file=sys.stderr)
 from models import db, ProductMap, SyncLog, AppSetting
-
-print("STEP 3: Models imported. Importing OdooClient...", file=sys.stderr)
-try:
-    from odoo_client import OdooClient
-except ImportError as e:
-    print(f"CRITICAL ERROR: Could not import OdooClient. Check odoo_client.py for syntax errors. Details: {e}", file=sys.stderr)
-    OdooClient = None
-except Exception as e:
-    print(f"CRITICAL ERROR: Error in odoo_client.py: {e}", file=sys.stderr)
-    OdooClient = None
-
+from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 import random
@@ -30,20 +13,16 @@ import random
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-print("STEP 4: Configuring Database...", file=sys.stderr)
-
 # FIX: Handle Supabase connection string for pg8000 driver
-database_url = os.getenv('DATABASE_URL')
+database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
 
 if database_url:
+    # If it starts with postgres://, change to postgresql+pg8000://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
+    # If it starts with postgresql://, change to postgresql+pg8000://
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
-else:
-    # Fallback for local testing/safety
-    print("WARNING: No DATABASE_URL found. Using local sqlite.", file=sys.stderr)
-    database_url = 'sqlite:///local.db'
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -54,38 +33,27 @@ db.init_app(app)
 
 # Initialize Odoo
 odoo = None
-print("STEP 5: Initializing Odoo Connection...", file=sys.stderr)
-if OdooClient:
-    try:
-        odoo = OdooClient(
-            url=os.getenv('ODOO_URL'),
-            db=os.getenv('ODOO_DB'),
-            username=os.getenv('ODOO_USERNAME'),
-            password=os.getenv('ODOO_PASSWORD')
-        )
-    except Exception as e:
-        print(f"Odoo Startup Error (App will run in Offline Mode): {e}", file=sys.stderr)
-else:
-    print("Odoo Client class not available. App running in restricted mode.", file=sys.stderr)
+try:
+    odoo = OdooClient(
+        url=os.getenv('ODOO_URL'),
+        db=os.getenv('ODOO_DB'),
+        username=os.getenv('ODOO_USERNAME'),
+        password=os.getenv('ODOO_PASSWORD')
+    )
+except Exception as e:
+    print(f"Odoo Startup Error: {e}")
 
-print("STEP 6: Creating Database Tables...", file=sys.stderr)
 with app.app_context():
     try: db.create_all()
-    except Exception as e: 
-        print(f"DB Creation Error (Check DATABASE_URL credentials): {e}", file=sys.stderr)
-
-print("STEP 7: App Startup Complete. Ready to serve.", file=sys.stderr)
+    except: pass
 
 # --- HELPERS ---
 def get_config(key, default=None):
     """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        # Handle cases where value might be a simple string or JSON
-        try:
-            return json.loads(setting.value)
-        except:
-            return setting.value
+        try: return json.loads(setting.value)
+        except: return setting.value
     except:
         return default
 
@@ -96,7 +64,6 @@ def set_config(key, value):
         if not setting:
             setting = AppSetting(key=key)
             db.session.add(setting)
-        # Store complex data as JSON string
         setting.value = json.dumps(value)
         db.session.commit()
         return True
@@ -121,13 +88,11 @@ def log_event(entity, status, message):
 
 def process_order_data(data):
     """Core logic to sync a single order"""
-    if not odoo: return False, "Odoo Offline"
-
     email = data.get('email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # Load Company ID from Settings to prevent cross-company errors
+    # Load Company ID from Settings
     company_id = get_config('odoo_company_id')
     
     # FALLBACK: If no company configured, try to auto-detect from API User
@@ -136,7 +101,7 @@ def process_order_data(data):
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
             if user_info:
-                company_id = user_info[0]['company_id'][0] # [ID, Name]
+                company_id = user_info[0]['company_id'][0] 
         except Exception as e:
             print(f"DEBUG: Failed to auto-detect company: {e}")
 
@@ -187,20 +152,23 @@ def process_order_data(data):
         cost = float(ship.get('price', 0))
         title = ship.get('title', 'Shipping')
         
-        # 1. Try to find existing
+        # 1. Try to find existing (by Name)
         ship_pid = odoo.search_product_by_name(title, company_id)
         
-        # 2. If NOT found, create it!
+        # 2. If NOT found, try generic 'Shipping'
+        if not ship_pid:
+            ship_pid = odoo.search_product_by_name("Shipping", company_id)
+        
+        # 3. If STILL not found, CREATE IT (New Feature)
         if not ship_pid:
             try:
                 print(f"DEBUG: Creating new shipping product '{title}'")
                 ship_pid = odoo.create_service_product(title, company_id)
-                # Ensure it's an integer ID
+                # Odoo returns just the ID [123] or just 123
                 if isinstance(ship_pid, list): ship_pid = ship_pid[0]
             except Exception as e:
                 print(f"ERROR creating shipping product: {e}")
-                # Last resort fallback if creation fails
-                ship_pid = odoo.search_product_by_name("Shipping", company_id)
+                log_event('Product', 'Error', f"Could not create shipping product '{title}': {str(e)}")
 
         if cost >= 0 and ship_pid:
             lines.append((0, 0, {
@@ -232,7 +200,6 @@ def process_order_data(data):
             'note': "\n\n".join(notes)
         }
         
-        # Explicitly set the company_id on the order if configured or detected
         if company_id:
              order_vals['company_id'] = int(company_id)
 
@@ -303,16 +270,13 @@ def api_save_settings():
 def sync_inventory():
     if not odoo: return jsonify({"error": "Offline"}), 500
     
-    # Load Settings from DB
-    env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
-    default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
-    
-    target_locations = get_config('inventory_locations', default_locs)
+    # Load Settings
+    target_locations = get_config('inventory_locations', [])
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
-    company_id = get_config('odoo_company_id', None) # Get Company ID
-    
-    # Auto-detect company if missing for inventory too
+    company_id = get_config('odoo_company_id', None)
+
+    # If no company saved, try auto-detect
     if not company_id:
         try:
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
