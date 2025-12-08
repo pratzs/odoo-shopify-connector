@@ -109,11 +109,11 @@ def process_order_data(data):
         except Exception as e:
             print(f"DEBUG: Failed to auto-detect company: {e}")
 
-    # 1. Check if Order Exists (Prevent Resend)
+    # 1. Check if Order Exists
+    existing_ids = []
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-        if existing_ids: return True, f"Order {client_ref} already exists."
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
@@ -263,7 +263,7 @@ def process_order_data(data):
     if gateways: notes.append(f"Payment: {', '.join(gateways)}")
     
     try:
-        order_vals = {
+        vals = {
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': partner_id,           
             'partner_invoice_id': invoice_id,   
@@ -275,11 +275,30 @@ def process_order_data(data):
         }
         
         if company_id:
-             order_vals['company_id'] = int(company_id)
+             vals['company_id'] = int(company_id)
 
-        odoo.create_sale_order(order_vals)
-        log_event('Order', 'Success', f"Synced {client_ref}")
-        return True, "Synced"
+        # UPDATE or CREATE Logic
+        if existing_ids:
+            # Check state before updating
+            order_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'sale.order', 'read', [existing_ids[0]], {'fields': ['state']})
+            
+            if order_data and order_data[0]['state'] in ['draft', 'sent']:
+                # Update existing draft order
+                # Use (5, 0, 0) to remove old lines, then add new ones
+                vals['order_line'] = [(5, 0, 0)] + lines
+                odoo.update_sale_order(existing_ids[0], vals)
+                log_event('Order', 'Success', f"Updated existing Order {client_ref}")
+                return True, "Updated"
+            else:
+                log_event('Order', 'Skipped', f"Order {client_ref} exists and is locked ({order_data[0]['state']}).")
+                return True, "Order Locked"
+        else:
+            # Create new
+            odoo.create_sale_order(vals)
+            log_event('Order', 'Success', f"Synced {client_ref}")
+            return True, "Synced"
+
     except Exception as e:
         log_event('Order', 'Error', f"Failed {client_ref}: {str(e)}")
         return False, str(e)
