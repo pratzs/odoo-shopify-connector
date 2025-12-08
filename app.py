@@ -2,8 +2,9 @@ import os
 import hmac
 import hashlib
 import base64
+import json
 from flask import Flask, request, jsonify, render_template
-from models import db, ProductMap, SyncLog
+from models import db, ProductMap, SyncLog, AppSetting
 from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
@@ -26,13 +27,6 @@ if database_url:
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Odoo Locations
-location_env = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
-try:
-    ODOO_LOCATION_IDS = [int(x) for x in location_env.split(',') if x.strip().isdigit()]
-except:
-    ODOO_LOCATION_IDS = []
-
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
 db.init_app(app)
@@ -47,11 +41,39 @@ try:
         password=os.getenv('ODOO_PASSWORD')
     )
 except Exception as e:
-    print(f"Odoo Connection Error: {e}")
+    print(f"Odoo Startup Error: {e}")
 
 with app.app_context():
     try: db.create_all()
     except: pass
+
+# --- HELPERS ---
+def get_config(key, default=None):
+    """Retrieve setting from DB, fallback to default"""
+    try:
+        setting = AppSetting.query.get(key)
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
+    except:
+        return default
+
+def set_config(key, value):
+    """Save setting to DB"""
+    try:
+        setting = AppSetting.query.get(key)
+        if not setting:
+            setting = AppSetting(key=key)
+            db.session.add(setting)
+        # Store complex data as JSON string
+        setting.value = json.dumps(value)
+        db.session.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
 
 def verify_shopify(data, hmac_header):
     secret = os.getenv('SHOPIFY_SECRET')
@@ -61,7 +83,6 @@ def verify_shopify(data, hmac_header):
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
 
 def log_event(entity, status, message):
-    """Helper to save logs to DB safely"""
     try:
         log = SyncLog(entity=entity, status=status, message=message)
         db.session.add(log)
@@ -70,7 +91,7 @@ def log_event(entity, status, message):
         print(f"DB LOG ERROR: {e}")
 
 def process_order_data(data):
-    """Core logic to sync a single order - Used by Webhook AND Manual Trigger"""
+    """Core logic to sync a single order"""
     email = data.get('email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
@@ -79,19 +100,16 @@ def process_order_data(data):
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-        
-        if existing_ids:
-            return True, f"Order {client_ref} already exists in Odoo."
+        if existing_ids: return True, f"Order {client_ref} already exists."
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
     # 2. Customer Sync
     partner = odoo.search_partner_by_email(email)
     if not partner:
-        log_event('Customer', 'Failed', f"Email {email} not found in Odoo for Order {client_ref}")
+        log_event('Customer', 'Failed', f"Email {email} not found")
         return False, "Customer Missing"
     
-    # Hierarchy Logic
     if partner.get('parent_id'):
         invoice_id, shipping_id, main_id = partner['parent_id'][0], partner['id'], partner['parent_id'][0]
     else:
@@ -116,12 +134,14 @@ def process_order_data(data):
                 'price_unit': price, 'name': item['name'], 'discount': pct
             }))
         else:
-            log_event('Product', 'Warning', f"SKU {sku} not found in Odoo (Order {client_ref})")
+            log_event('Product', 'Warning', f"SKU {sku} not found")
 
-    # Shipping
+    # Shipping (Match by Name)
     for ship in data.get('shipping_lines', []):
         cost = float(ship.get('price', 0))
         title = ship.get('title', 'Shipping')
+        
+        # Try finding exact name, then fallback to generic
         ship_pid = odoo.search_product_by_name(title) or odoo.search_product_by_name("Shipping")
         
         if cost >= 0 and ship_pid:
@@ -130,75 +150,77 @@ def process_order_data(data):
                 'price_unit': cost, 'name': title, 'is_delivery': True
             }))
 
-    if not lines: return False, "No valid lines to sync"
+    if not lines: return False, "No valid lines"
 
-    # 4. Create Order
+    # 4. Create Order with Notes
     notes = []
     if data.get('note'): notes.append(f"Note: {data['note']}")
-    if data.get('payment_gateway_names'): notes.append(f"Payment: {', '.join(data['payment_gateway_names'])}")
+    
+    # Handle Payment Gateway Logic
+    gateways = data.get('payment_gateway_names')
+    if not gateways and data.get('gateway'):
+        gateways = [data.get('gateway')]
+    
+    if gateways: notes.append(f"Payment: {', '.join(gateways)}")
     
     try:
         odoo.create_sale_order({
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
             'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
-            'note': "\n".join(notes)
+            'note': "\n\n".join(notes)
         })
-        log_event('Order', 'Success', f"Synced {client_ref} to Odoo ID {main_id}")
+        log_event('Order', 'Success', f"Synced {client_ref}")
         return True, "Synced"
     except Exception as e:
-        log_event('Order', 'Error', f"Failed to create {client_ref}: {str(e)}")
+        log_event('Order', 'Error', f"Failed {client_ref}: {str(e)}")
         return False, str(e)
-
-# --- HELPERS FOR MANUAL SYNC ---
-def check_odoo_order_status(shopify_name):
-    """
-    Checks if order exists in Odoo.
-    Checks both 'ONLINE_#1001' (Our App) and '#1001' (Techmarbles/Others).
-    """
-    client_ref_our = f"ONLINE_{shopify_name}"
-    client_ref_tech = shopify_name
-    
-    # Search for EITHER format
-    domain = ['|', ('client_order_ref', '=', client_ref_our), ('client_order_ref', '=', client_ref_tech)]
-    
-    try:
-        existing = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-            'sale.order', 'search_read', [domain], {'fields': ['name', 'client_order_ref', 'state']})
-        
-        if not existing:
-            return "Not Synced"
-        
-        for order in existing:
-            ref = order.get('client_order_ref', '')
-            if ref == client_ref_our:
-                return f"Synced (Our App)"
-            if ref == client_ref_tech:
-                return f"Synced (Techmarbles)"
-                
-        return "Synced (Unknown)"
-    except:
-        return "Check Failed"
 
 # --- ROUTES ---
 
 @app.route('/')
 def dashboard():
-    # Fetch logs separated by category for the UI tabs
     try:
         logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_customers = SyncLog.query.filter_by(entity='Customer').order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
-    except Exception as e:
-        print(f"Database Read Error: {e}")
+    except:
         logs_orders = logs_inventory = logs_customers = logs_system = []
     
+    # Get Settings
+    env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
+    default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
+    
+    current_locations = get_config('inventory_locations', default_locs)
+    current_field = get_config('inventory_field', 'qty_available')
+
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
                            logs_orders=logs_orders, logs_inventory=logs_inventory, 
                            logs_customers=logs_customers, logs_system=logs_system,
-                           odoo_status=odoo_status, locations=ODOO_LOCATION_IDS)
+                           odoo_status=odoo_status, 
+                           current_locations=current_locations,
+                           current_field=current_field)
+
+# --- SETTINGS API ---
+@app.route('/api/odoo/locations', methods=['GET'])
+def api_get_locations():
+    if not odoo: return jsonify({"error": "Odoo Offline"}), 500
+    try:
+        locs = odoo.get_locations()
+        return jsonify(locs)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/settings/save', methods=['POST'])
+def api_save_settings():
+    data = request.json
+    if 'locations' in data:
+        set_config('inventory_locations', data['locations'])
+    if 'field' in data:
+        set_config('inventory_field', data['field'])
+    return jsonify({"message": "Settings Saved"})
 
 @app.route('/test/simulate_order', methods=['POST'])
 def simulate_order():
@@ -213,66 +235,36 @@ def simulate_order():
     except Exception as e:
         return jsonify({"message": f"Test Failed: {str(e)}"}), 500
 
-# --- UPDATED: MANUAL TRIGGER (FETCH ONLY) ---
 @app.route('/sync/orders/manual', methods=['GET'])
 def manual_order_fetch():
-    # Fetch last 10 orders (any status)
-    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=any&limit=10"
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=5"
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
-    
     res = requests.get(url, headers=headers)
-    if res.status_code != 200:
-        return jsonify({"error": f"Failed to fetch from Shopify: {res.status_code}"}), 500
+    if res.status_code != 200: return jsonify({"error": "Shopify Error"}), 500
     
-    orders_data = []
-    for order in res.json().get('orders', []):
-        # Check Odoo for duplicate status before returning
-        status = check_odoo_order_status(order['name'])
-        
-        orders_data.append({
-            'id': order['id'],
-            'name': order['name'],
-            'date': order['created_at'],
-            'total': order['total_price'],
-            'email': order.get('email', 'No Email'),
-            'odoo_status': status
-        })
-        
-    # Return JSON list for Frontend to display in a modal/list
-    return jsonify({"orders": orders_data})
+    orders = res.json().get('orders', [])
+    synced = 0
+    for order in orders:
+        success, _ = process_order_data(order)
+        if success: synced += 1
+    return jsonify({"message": f"Processed {len(orders)}. Synced: {synced}"})
 
-# --- NEW: BATCH IMPORT ENDPOINT ---
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
     selected_ids = request.json.get('order_ids', [])
-    if not selected_ids:
-        return jsonify({"message": "No orders selected"}), 400
-        
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     synced = 0
-    errors = 0
-    
     for order_id in selected_ids:
-        # Fetch full order details
         url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{order_id}.json"
         res = requests.get(url, headers=headers)
-        
         if res.status_code == 200:
-            order_data = res.json().get('order')
-            success, msg = process_order_data(order_data)
-            if success: 
-                synced += 1
-            else:
-                errors += 1
-                
-    return jsonify({"message": f"Batch Complete. Synced: {synced}, Errors/Skipped: {errors}"})
+            success, _ = process_order_data(res.json().get('order'))
+            if success: synced += 1
+    return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
-# --- WEBHOOKS ---
 @app.route('/webhook/orders', methods=['POST'])
 def order_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
-        return "Unauthorized", 401
-    
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
     process_order_data(request.json)
     return "Received", 200
 
@@ -281,14 +273,10 @@ def order_cancelled_webhook():
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
     data = request.json
     client_ref = f"ONLINE_{data.get('name')}"
-    
-    order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-        'sale.order', 'search', [[['client_order_ref', '=', client_ref], ['state', '!=', 'cancel']]])
-
+    order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref], ['state', '!=', 'cancel']]])
     if order_ids:
         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'action_cancel', [order_ids])
         log_event('Order Cancel', 'Success', f"Cancelled {client_ref}")
-        
     return "Cancelled", 200
 
 @app.route('/webhook/refunds', methods=['POST'])
@@ -301,27 +289,31 @@ def refund_webhook():
 def sync_inventory():
     if not odoo: return jsonify({"error": "Offline"}), 500
     
+    # Load Settings from DB
+    env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
+    default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
+    
+    target_locations = get_config('inventory_locations', default_locs)
+    target_field = get_config('inventory_field', 'qty_available')
+
     last_run = datetime.utcnow() - timedelta(minutes=35)
-    try:
-        product_ids = odoo.get_changed_products(str(last_run))
-    except:
-        return jsonify({"error": "Read Failed"}), 500
+    try: product_ids = odoo.get_changed_products(str(last_run))
+    except: return jsonify({"error": "Read Failed"}), 500
     
     count = 0
     for p_id in product_ids:
-        total = odoo.get_total_qty_for_locations(p_id, ODOO_LOCATION_IDS)
+        total = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
         count += 1
         if count <= 3:
              p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'read', [p_id], {'fields': ['default_code']})
              sku = p_data[0].get('default_code')
-             log_event('Inventory', 'Info', f"Synced SKU {sku}: Qty {total}")
+             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total} ({target_field})")
 
-    return jsonify({"synced": count, "message": "Inventory Sync Completed"})
+    return jsonify({"synced": count})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
-    # Cancellation Odoo -> Shopify logic
     return jsonify({"status": "Checked"})
 
 if __name__ == '__main__':
