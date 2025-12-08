@@ -52,11 +52,8 @@ def get_config(key, default=None):
     """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        # Handle cases where value might be a simple string or JSON
-        try:
-            return json.loads(setting.value)
-        except:
-            return setting.value
+        try: return json.loads(setting.value)
+        except: return setting.value
     except:
         return default
 
@@ -156,14 +153,18 @@ def process_order_data(data):
         else:
             partner_id = partner['id']
 
+    # Ensure partner_id is an integer for child creation
+    partner_id = int(partner_id)
+
     # 2B. Handle Delivery Address (Child Contact)
     ship_addr = data.get('shipping_address', {})
     shipping_id = partner_id # Default to parent
     
     if ship_addr:
-        # Improved Name Logic
+        # Improved Name Logic: Fallback to "Delivery Address" if names missing
         s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip()
-        if not s_name: s_name = ship_addr.get('name', 'Delivery Address')
+        if not s_name: s_name = ship_addr.get('name', '')
+        if not s_name: s_name = "Delivery Address"
 
         shipping_data = {
             'name': s_name,
@@ -189,7 +190,8 @@ def process_order_data(data):
 
     if bill_addr:
         b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip()
-        if not b_name: b_name = bill_addr.get('name', 'Invoice Address')
+        if not b_name: b_name = bill_addr.get('name', '')
+        if not b_name: b_name = "Invoice Address"
         
         billing_data = {
             'name': b_name,
