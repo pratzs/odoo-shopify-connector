@@ -52,8 +52,11 @@ def get_config(key, default=None):
     """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
     except:
         return default
 
@@ -64,6 +67,7 @@ def set_config(key, value):
         if not setting:
             setting = AppSetting(key=key)
             db.session.add(setting)
+        # Store complex data as JSON string
         setting.value = json.dumps(value)
         db.session.commit()
         return True
@@ -88,11 +92,11 @@ def log_event(entity, status, message):
 
 def process_order_data(data):
     """Core logic to sync a single order"""
-    email = data.get('email')
+    email = data.get('email') or data.get('contact_email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # Load Company ID from Settings
+    # Load Company ID from Settings to prevent cross-company errors
     company_id = get_config('odoo_company_id')
     
     # FALLBACK: If no company configured, try to auto-detect from API User
@@ -101,7 +105,7 @@ def process_order_data(data):
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
             if user_info:
-                company_id = user_info[0]['company_id'][0] 
+                company_id = user_info[0]['company_id'][0] # [ID, Name]
         except Exception as e:
             print(f"DEBUG: Failed to auto-detect company: {e}")
 
@@ -113,10 +117,11 @@ def process_order_data(data):
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
-    # 2. Customer Sync
+    # 2. Customer Sync & Creation
     partner = odoo.search_partner_by_email(email)
+    
+    # Create Customer if missing
     if not partner:
-        # Create Customer if missing
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         
@@ -127,7 +132,7 @@ def process_order_data(data):
             'name': name,
             'email': email,
             'phone': cust_data.get('phone') or def_address.get('phone'),
-            'company_type': 'company',
+            'company_type': 'company', # Create as Parent Company
             'street': def_address.get('address1'),
             'city': def_address.get('city'),
             'zip': def_address.get('zip'),
@@ -145,33 +150,51 @@ def process_order_data(data):
         except Exception as e:
             log_event('Customer', 'Error', f"Failed to create customer {email}: {e}")
             return False, f"Customer Creation Failed: {e}"
-
-    if partner.get('parent_id'):
-        invoice_id, shipping_id, main_id = partner['parent_id'][0], partner['id'], partner['parent_id'][0]
     else:
-        # Standard customer (Parent is also billing/shipping target unless child exists)
-        partner_id = partner['id']
-        invoice_id = partner_id
-        main_id = partner_id
-        
-        # Try to resolve Delivery Address Child
-        ship_addr = data.get('shipping_address', {})
-        if ship_addr:
-            shipping_data = {
-                'name': f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip(),
-                'street': ship_addr.get('address1'),
-                'city': ship_addr.get('city'),
-                'zip': ship_addr.get('zip'),
-                'phone': ship_addr.get('phone'),
-                'country_code': ship_addr.get('country_code'),
-                'email': email
-            }
-            try:
-                shipping_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
-            except:
-                shipping_id = partner_id 
+        if partner.get('parent_id'):
+            partner_id = partner['parent_id'][0]
         else:
-            shipping_id = partner_id
+            partner_id = partner['id']
+
+    # 2B. Handle Delivery Address (Child Contact)
+    ship_addr = data.get('shipping_address', {})
+    shipping_id = partner_id # Default to parent
+    
+    if ship_addr:
+        shipping_data = {
+            'name': f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip(),
+            'street': ship_addr.get('address1'),
+            'city': ship_addr.get('city'),
+            'zip': ship_addr.get('zip'),
+            'phone': ship_addr.get('phone'),
+            'country_code': ship_addr.get('country_code'),
+            'email': email
+        }
+        try:
+            shipping_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
+        except Exception as e:
+            log_event('Customer', 'Warning', f"Could not create Delivery Address: {e}")
+            # shipping_id remains partner_id
+
+    # 2C. Handle Invoice Address (Child Contact)
+    bill_addr = data.get('billing_address') or ship_addr # Fallback to shipping if missing
+    invoice_id = partner_id # Default to parent
+
+    if bill_addr:
+        billing_data = {
+            'name': f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip(),
+            'street': bill_addr.get('address1'),
+            'city': bill_addr.get('city'),
+            'zip': bill_addr.get('zip'),
+            'phone': bill_addr.get('phone'),
+            'country_code': bill_addr.get('country_code'),
+            'email': email
+        }
+        try:
+            invoice_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
+        except Exception as e:
+            log_event('Customer', 'Warning', f"Could not create Invoice Address: {e}")
+            # invoice_id remains partner_id
 
     # 3. Build Lines
     lines = []
@@ -196,7 +219,7 @@ def process_order_data(data):
         else:
             log_event('Product', 'Warning', f"SKU {sku} not found in Company {company_id or 'All'}")
 
-    # Shipping (Auto-Create)
+    # Shipping (Auto-Create if Missing)
     for ship in data.get('shipping_lines', []):
         cost = float(ship.get('price', 0))
         title = ship.get('title', 'Shipping')
@@ -242,10 +265,12 @@ def process_order_data(data):
     try:
         order_vals = {
             'name': client_ref, 'client_order_ref': client_ref,
-            'partner_id': main_id, 
-            'partner_invoice_id': invoice_id, 
-            'partner_shipping_id': shipping_id,
-            'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
+            'partner_id': partner_id,           
+            'partner_invoice_id': invoice_id,   
+            'partner_shipping_id': shipping_id, 
+            'order_line': lines, 
+            'user_id': odoo.uid, 
+            'state': 'draft', 
             'note': "\n\n".join(notes)
         }
         
@@ -271,6 +296,7 @@ def dashboard():
     except:
         logs_orders = logs_inventory = logs_customers = logs_system = []
     
+    # Get Settings
     env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
@@ -279,9 +305,7 @@ def dashboard():
         "field": get_config('inventory_field', 'qty_available'),
         "sync_zero": get_config('sync_zero_stock', False),
         "combine_committed": get_config('combine_committed', False),
-        "company_id": get_config('odoo_company_id', None),
-        "cust_direction": get_config('cust_direction', 'bidirectional'),
-        "cust_auto_sync": get_config('cust_auto_sync', True)
+        "company_id": get_config('odoo_company_id', None)
     }
 
     odoo_status = True if odoo else False
@@ -314,15 +338,13 @@ def api_save_settings():
     set_config('sync_zero_stock', data.get('sync_zero', False))
     set_config('combine_committed', data.get('combine_committed', False))
     set_config('odoo_company_id', data.get('company_id'))
-    # Save Customer Settings
-    set_config('cust_direction', data.get('cust_direction'))
-    set_config('cust_auto_sync', data.get('cust_auto_sync'))
     return jsonify({"message": "Settings Saved"})
 
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory():
     if not odoo: return jsonify({"error": "Offline"}), 500
     
+    # Load Settings from DB
     target_locations = get_config('inventory_locations', [])
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
@@ -409,17 +431,8 @@ def refund_webhook():
     return "Received", 200
 
 @app.route('/test/simulate_order', methods=['POST'])
-def simulate_order():
-    if not odoo: return jsonify({"message": "Odoo Offline"}), 500
-    try:
-        test_email = os.getenv('ODOO_USERNAME') 
-        partner = odoo.search_partner_by_email(test_email)
-        status = 'Success' if partner else 'Warning'
-        msg = f"Connection Test: Found Admin ID {partner['id']}" if partner else "Connection Test: Admin email not found"
-        log_event('Test Connection', status, msg)
-        return jsonify({"message": msg})
-    except Exception as e:
-        return jsonify({"message": f"Test Failed: {str(e)}"}), 500
+def test_sim_dummy():
+     return jsonify({})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
