@@ -7,7 +7,7 @@ import schedule
 import shopify
 import xmlrpc.client
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 
@@ -479,10 +479,20 @@ def import_shopify_orders_to_odoo(order_ids):
                 continue
 
             # 3. Create Sale Order
+            # Convert Shopify Date (ISO8601 with Offset) to Odoo Date (UTC Naive String)
+            odoo_date = order.created_at
+            try:
+                if odoo_date:
+                    dt = datetime.fromisoformat(odoo_date)
+                    dt_utc = dt.astimezone(timezone.utc)
+                    odoo_date = dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception as e:
+                 logging.error(f"Date conversion failed for order {order.name}: {e}")
+
             so_vals = {
                 'partner_id': partner_id,
                 'client_order_ref': order.name,
-                'date_order': order.created_at,
+                'date_order': odoo_date,
                 'order_line': order_lines,
             }
             models.execute_kw(db, uid, password, 'sale.order', 'create', [so_vals])
