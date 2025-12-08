@@ -13,10 +13,14 @@ import random
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
+# FIX: Handle Supabase connection string for pg8000 driver
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
+
 if database_url:
+    # If it starts with postgres://, change to postgresql+pg8000://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
+    # If it starts with postgresql://, change to postgresql+pg8000://
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
 
@@ -45,19 +49,25 @@ with app.app_context():
 
 # --- HELPERS ---
 def get_config(key, default=None):
+    """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
     except:
         return default
 
 def set_config(key, value):
+    """Save setting to DB"""
     try:
         setting = AppSetting.query.get(key)
         if not setting:
             setting = AppSetting(key=key)
             db.session.add(setting)
+        # Store complex data as JSON string
         setting.value = json.dumps(value)
         db.session.commit()
         return True
@@ -82,31 +92,24 @@ def log_event(entity, status, message):
 
 def process_order_data(data):
     """Core logic to sync a single order"""
+    email = data.get('email') or data.get('customer', {}).get('email')
     shopify_name = data.get('name')
-    
-    # 1. ROBUSTNESS CHECK: Is this order cancelled?
-    # If Shopify says it's cancelled, we stop immediately.
-    if data.get('cancelled_at'):
-        log_event('Order', 'Skipped', f"Order {shopify_name} is cancelled in Shopify. Not syncing to Odoo.")
-        return False, "Order is cancelled"
-
-    email = data.get('email')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # Load Company ID from Settings
+    # Load Company ID from Settings to prevent cross-company errors
     company_id = get_config('odoo_company_id')
     
-    # Fallback Company Detection
+    # FALLBACK: If no company configured, try to auto-detect from API User
     if not company_id and odoo:
         try:
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
             if user_info:
-                company_id = user_info[0]['company_id'][0] 
+                company_id = user_info[0]['company_id'][0] # [ID, Name]
         except Exception as e:
             print(f"DEBUG: Failed to auto-detect company: {e}")
 
-    # 2. Check if Order Exists (Prevent Resend)
+    # 1. Check if Order Exists (Prevent Resend)
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -114,24 +117,64 @@ def process_order_data(data):
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
-    # 3. Customer Sync
+    # 2. Customer Sync & Creation
     partner = odoo.search_partner_by_email(email)
-    if not partner:
-        log_event('Customer', 'Failed', f"Email {email} not found")
-        return False, "Customer Missing"
     
-    if partner.get('parent_id'):
-        invoice_id, shipping_id, main_id = partner['parent_id'][0], partner['id'], partner['parent_id'][0]
-    else:
-        invoice_id = shipping_id = main_id = partner['id']
+    # Create Customer if missing
+    if not partner:
+        cust_data = data.get('customer', {})
+        def_address = data.get('billing_address') or data.get('shipping_address') or {}
+        new_partner_vals = {
+            'name': f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or "Shopify Customer",
+            'email': email,
+            'phone': cust_data.get('phone') or def_address.get('phone'),
+            'company_type': 'company',
+            'street': def_address.get('address1'),
+            'city': def_address.get('city'),
+            'zip': def_address.get('zip'),
+            'country_code': def_address.get('country_code'),
+        }
+        if company_id: new_partner_vals['company_id'] = int(company_id)
 
-    # 4. Build Lines
+        try:
+            partner_id = odoo.create_partner(new_partner_vals)
+            log_event('Customer', 'Success', f"Created New Customer: {new_partner_vals['name']}")
+        except Exception as e:
+            log_event('Customer', 'Error', f"Failed to create customer: {e}")
+            return False, "Customer Creation Failed"
+    else:
+        if partner.get('parent_id'):
+            partner_id = partner['parent_id'][0]
+        else:
+            partner_id = partner['id']
+
+    # Handle Delivery Address (Child Contact)
+    ship_addr = data.get('shipping_address', {})
+    shipping_data = {
+        'name': f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip(),
+        'street': ship_addr.get('address1'),
+        'city': ship_addr.get('city'),
+        'zip': ship_addr.get('zip'),
+        'phone': ship_addr.get('phone'),
+        'country_code': ship_addr.get('country_code'),
+        'email': email 
+    }
+    
+    try:
+        shipping_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
+    except:
+        shipping_id = partner_id # Fallback
+
+    invoice_id = partner_id
+
+    # 3. Build Lines
     lines = []
     # Products
     for item in data.get('line_items', []):
         sku = item.get('sku')
         if not sku: continue
         
+        # Pass company_id to enforce selection from correct company
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
@@ -147,16 +190,19 @@ def process_order_data(data):
         else:
             log_event('Product', 'Warning', f"SKU {sku} not found in Company {company_id or 'All'}")
 
-    # Shipping (Auto-Create)
+    # Shipping (Auto-Create if Missing)
     for ship in data.get('shipping_lines', []):
         cost = float(ship.get('price', 0))
         title = ship.get('title', 'Shipping')
         
+        # 1. Try to find existing
         ship_pid = odoo.search_product_by_name(title, company_id)
         
+        # 2. If NOT found, try generic 'Shipping'
         if not ship_pid:
             ship_pid = odoo.search_product_by_name("Shipping", company_id)
         
+        # 3. If STILL not found, CREATE IT
         if not ship_pid:
             try:
                 print(f"DEBUG: Creating new shipping product '{title}'")
@@ -177,7 +223,7 @@ def process_order_data(data):
 
     if not lines: return False, "No valid lines"
 
-    # 5. Create Order
+    # 4. Create Order with Notes
     notes = []
     if data.get('note'): notes.append(f"Note: {data['note']}")
     
@@ -190,8 +236,12 @@ def process_order_data(data):
     try:
         order_vals = {
             'name': client_ref, 'client_order_ref': client_ref,
-            'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
-            'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
+            'partner_id': partner_id,           
+            'partner_invoice_id': invoice_id,   
+            'partner_shipping_id': shipping_id, 
+            'order_line': lines, 
+            'user_id': odoo.uid, 
+            'state': 'draft', 
             'note': "\n\n".join(notes)
         }
         
@@ -217,6 +267,7 @@ def dashboard():
     except:
         logs_orders = logs_inventory = logs_customers = logs_system = []
     
+    # Get Settings
     env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
@@ -264,19 +315,21 @@ def api_save_settings():
 def sync_inventory():
     if not odoo: return jsonify({"error": "Offline"}), 500
     
+    # Load Settings from DB
     target_locations = get_config('inventory_locations', [])
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
-    company_id = get_config('odoo_company_id', None)
-
+    company_id = get_config('odoo_company_id', None) # Get Company ID
+    
     if not company_id:
         try:
-            u = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
-            if u: company_id = u[0]['company_id'][0]
+            user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
+            if user_info: company_id = user_info[0]['company_id'][0]
         except: pass
 
     last_run = datetime.utcnow() - timedelta(minutes=35)
     try: 
+        # Pass Company ID to get_changed_products to filter inventory source
         product_ids = odoo.get_changed_products(str(last_run), company_id)
     except: return jsonify({"error": "Read Failed"}), 500
     
@@ -291,7 +344,7 @@ def sync_inventory():
              p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'read', [p_id], {'fields': ['default_code']})
              sku = p_data[0].get('default_code')
-             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total}")
+             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total} ({target_field})")
 
     return jsonify({"synced": count})
 
@@ -310,9 +363,7 @@ def manual_order_fetch():
             if exists: status = "Synced"
         except: pass
         
-        # Add cancelled status to UI
-        if o.get('cancelled_at'):
-            status = "Cancelled (Skipped)"
+        if o.get('cancelled_at'): status = "Cancelled (Skipped)"
             
         mapped_orders.append({'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status})
     return jsonify({"orders": mapped_orders})
