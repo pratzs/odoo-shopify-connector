@@ -261,6 +261,20 @@ def sync_odoo_products_to_shopify():
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
 
+@app.route('/manual_sync_products', methods=['POST'])
+def manual_sync_products():
+    """Trigger manual sync from Odoo to Shopify"""
+    try:
+        # Run in thread to not block the response
+        t = threading.Thread(target=sync_odoo_products_to_shopify)
+        t.start()
+        flash("Manual Product Sync (Odoo -> Shopify) started in background.", "success")
+    except Exception as e:
+        flash(f"Failed to start sync: {str(e)}", "error")
+        logging.error(f"Manual sync trigger failed: {e}")
+        
+    return redirect(url_for('index'))
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
@@ -288,6 +302,17 @@ def index():
     return render_template_string('''
         <!-- ... existing HTML header ... -->
         
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div style="margin: 10px 0; padding: 10px; border: 1px solid #ccc; background: #f0f0f0;">
+            {% for category, message in messages %}
+              <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+        
         <h2>Product Sync Settings</h2>
         <div class="card">
             <label>Product Sync Direction:</label>
@@ -298,6 +323,15 @@ def index():
             </select>
             <small>If Bidirectional/Shopify-to-Odoo: Incoming orders with unknown SKUs will create products in Odoo (Category: PRODUCT BU, UoM: Unit).</small>
             <small>If Bidirectional/Odoo-to-Shopify: Products created/updated in Odoo sync to Shopify every 30 mins (incl. Images, Cost, Vendor Code).</small>
+            
+            <hr>
+            <h3>Manual Actions</h3>
+            <p>Force sync newly added products from Odoo to Shopify immediately.</p>
+            <form action="{{ url_for('manual_sync_products') }}" method="POST">
+                <button type="submit" style="padding: 10px 20px; background-color: #007bff; color: white; border: none; cursor: pointer;">
+                    Sync Odoo Products to Shopify Now
+                </button>
+            </form>
         </div>
 
         <!-- ... existing HTML ... -->
