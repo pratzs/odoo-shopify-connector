@@ -9,6 +9,8 @@ from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 import random
+import threading
+import time
 
 app = Flask(__name__)
 
@@ -81,13 +83,52 @@ def extract_id(res):
         return res[0]
     return res
 
+def get_odoo_address_codes(country_id, state_id):
+    """Fetch ISO codes for Country and State from Odoo IDs"""
+    c_code = None
+    s_code = None
+    try:
+        if country_id:
+            c_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.country', 'read', [extract_id(country_id)], {'fields': ['code']})
+            if c_res: c_code = c_res[0].get('code')
+        if state_id:
+            s_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.country.state', 'read', [extract_id(state_id)], {'fields': ['code']})
+            if s_res: s_code = s_res[0].get('code')
+    except: pass
+    return c_code, s_code
+
+def update_shopify_order_address(order_id, address_data, type='shipping_address'):
+    """Updates Shopify Order with address data from Odoo"""
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{order_id}.json"
+    headers = {
+        "X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN'),
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "order": {
+            "id": order_id,
+            type: address_data
+        }
+    }
+    try:
+        res = requests.put(url, json=payload, headers=headers)
+        if res.status_code == 200:
+            log_event('Shopify Update', 'Success', f"Updated {type} for Order {order_id} from Odoo data")
+        else:
+            log_event('Shopify Update', 'Error', f"Failed to update {type}: {res.text}")
+    except Exception as e:
+        log_event('Shopify Update', 'Error', f"Exception updating {type}: {str(e)}")
+
 def process_order_data(data):
     """Core logic to sync a single order"""
+    # 1. Extract Basic Info
+    shopify_id = data.get('id')
     email = data.get('email') or data.get('contact_email')
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     company_id = get_config('odoo_company_id')
     
+    # Try to fetch company_id from Odoo user if not set in config
     if not company_id and odoo:
         try:
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
@@ -95,72 +136,182 @@ def process_order_data(data):
             if user_info: company_id = user_info[0]['company_id'][0]
         except: pass
 
+    # Check if order already exists
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
     except Exception as e: return False, f"Odoo Error: {str(e)}"
 
-    # 1. Customer Resolution
-    partner = odoo.search_partner_by_email(email)
+    # 2. Customer Resolution
+    partner = None
+    partner_id = None
     
+    # A. Search by Email first
+    if email:
+        partner = odoo.search_partner_by_email(email)
+    
+    # B. If no email (POS?), Search by Name
     if not partner:
-        # Create Parent Company
-        cust_data = data.get('customer', {})
-        def_address = data.get('billing_address') or data.get('shipping_address') or {}
-        name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
+        cust_info = data.get('customer', {})
+        s_first = cust_info.get('first_name', '')
+        s_last = cust_info.get('last_name', '')
+        s_full = f"{s_first} {s_last}".strip() or cust_info.get('default_address', {}).get('name')
         
+        if s_full:
+            try:
+                # Search for exact name match in Odoo
+                p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'res.partner', 'search', [[['name', '=', s_full]]])
+                if p_ids:
+                    partner = {'id': p_ids[0], 'name': s_full}
+            except: pass
+
+    # 3. Handle Addresses (The "Two-Way Sync" Logic)
+    
+    # Extract Shopify Addresses
+    s_ship_addr = data.get('shipping_address')
+    s_bill_addr = data.get('billing_address')
+    
+    if partner:
+        # EXISTING PARTNER FOUND: Use Odoo Data if Shopify is empty
+        partner_id = extract_id(partner.get('id'))
+        
+        # Read full partner details to check for address/mobile
+        p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'res.partner', 'read', [partner_id], 
+            {'fields': ['street', 'street2', 'city', 'zip', 'state_id', 'country_id', 'mobile', 'email', 'name', 'phone']})
+        
+        if p_data:
+            p_rec = p_data[0]
+            
+            # --- Logic: If Shopify Missing Shipping, Use Odoo ---
+            if not s_ship_addr and (p_rec.get('street') or p_rec.get('city')):
+                # Fetch ISO codes for Shopify
+                c_code, s_code = get_odoo_address_codes(p_rec.get('country_id'), p_rec.get('state_id'))
+                
+                # Construct Address Object for Shopify
+                new_addr = {
+                    "first_name": p_rec.get('name', '').split(' ')[0],
+                    "last_name": " ".join(p_rec.get('name', '').split(' ')[1:]),
+                    "address1": p_rec.get('street') or "",
+                    "address2": p_rec.get('street2') or "",
+                    "city": p_rec.get('city') or "",
+                    "zip": p_rec.get('zip') or "",
+                    "country_code": c_code or "",
+                    "province_code": s_code or "",
+                    "phone": p_rec.get('mobile') or p_rec.get('phone') or ""
+                }
+                
+                # Update Shopify
+                update_shopify_order_address(shopify_id, new_addr, 'shipping_address')
+                
+                # Use this for Odoo logic below
+                s_ship_addr = new_addr 
+                log_event('Order', 'Info', f"Backfilled Shipping Address from Odoo for {shopify_name}")
+
+            # --- Logic: If Shopify Missing Billing, Use Odoo ---
+            if not s_bill_addr and (p_rec.get('street') or p_rec.get('city')):
+                 # (Re-use logic or fetch separate invoice address if complex, for now using main partner)
+                 c_code, s_code = get_odoo_address_codes(p_rec.get('country_id'), p_rec.get('state_id'))
+                 new_bill = {
+                    "first_name": p_rec.get('name', '').split(' ')[0],
+                    "last_name": " ".join(p_rec.get('name', '').split(' ')[1:]),
+                    "address1": p_rec.get('street') or "",
+                    "city": p_rec.get('city') or "",
+                    "zip": p_rec.get('zip') or "",
+                    "country_code": c_code or "",
+                    "province_code": s_code or "",
+                    "phone": p_rec.get('mobile') or ""
+                 }
+                 update_shopify_order_address(shopify_id, new_bill, 'billing_address')
+                 s_bill_addr = new_bill
+
+    else:
+        # PARTNER NOT FOUND: Create New (COMPANY)
+        cust_data = data.get('customer', {})
+        def_address = s_bill_addr or s_ship_addr or cust_data.get('default_address') or {}
+
+        first_name = cust_data.get('first_name') or def_address.get('first_name') or ''
+        last_name = cust_data.get('last_name') or def_address.get('last_name') or ''
+        full_name = f"{first_name} {last_name}".strip()
+        
+        if not full_name:
+            full_name = def_address.get('name') or def_address.get('company') or email or f"Shopify Customer {shopify_name}"
+
+        # ** NOTE: Mapping 'phone' from Shopify to 'mobile' in Odoo **
         vals = {
-            'name': name, 'email': email, 'phone': cust_data.get('phone') or def_address.get('phone'),
-            'company_type': 'company', 'street': def_address.get('address1'),
-            'city': def_address.get('city'), 'zip': def_address.get('zip'), 'country_code': def_address.get('country_code')
+            'name': full_name, 
+            'email': email or '', 
+            'mobile': cust_data.get('phone') or def_address.get('phone'), # Map to Mobile
+            'phone': '', # Keep Landline Empty
+            'company_type': 'company', # Create as Company
+            'street': def_address.get('address1'),
+            'city': def_address.get('city'), 
+            'zip': def_address.get('zip'), 
+            'country_code': def_address.get('country_code')
         }
         if company_id: vals['company_id'] = int(company_id)
 
         try:
             partner_id = odoo.create_partner(vals)
-            partner = {'id': partner_id, 'name': name, 'parent_id': False}
-            log_event('Customer', 'Success', f"Created Customer: {name}")
+            partner = {'id': partner_id, 'name': full_name, 'parent_id': False}
+            log_event('Customer', 'Success', f"Created Company Contact: {full_name}")
         except Exception as e:
             log_event('Customer', 'Error', f"Create Failed: {e}")
             return False, f"Customer Error: {e}"
     
-    partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+    # Ensure we have an ID
+    if not partner_id and partner:
+        partner_id = extract_id(partner.get('id'))
+
+    # 4. Final Address Assignment for Odoo SO
+    # Now that s_ship_addr and s_bill_addr might have been backfilled from Odoo, use them
     
-    # 2. Address Logic (Delivery)
-    ship_addr = data.get('shipping_address', {})
-    shipping_id = partner_id
-    
-    if ship_addr:
-        s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip() or ship_addr.get('name') or "Delivery Address"
+    shipping_id = partner_id 
+    if s_ship_addr:
+        s_name = f"{s_ship_addr.get('first_name', '')} {s_ship_addr.get('last_name', '')}".strip() or s_ship_addr.get('name') or "Delivery Address"
         shipping_data = {
-            'name': s_name, 'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
-            'zip': ship_addr.get('zip'), 'phone': ship_addr.get('phone'), 'country_code': ship_addr.get('country_code'), 'email': email
+            'name': s_name, 
+            'street': s_ship_addr.get('address1'), 
+            'city': s_ship_addr.get('city'),
+            'zip': s_ship_addr.get('zip'), 
+            'mobile': s_ship_addr.get('phone'), # Map to Mobile
+            'phone': '', # Keep Landline Empty
+            'country_code': s_ship_addr.get('country_code'), 
+            'email': email
         }
         try:
             found_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
             shipping_id = extract_id(found_id)
-            print(f"DEBUG: Resolved Delivery ID: {shipping_id}")
+            if shipping_id != partner_id:
+                 log_event('Customer', 'Info', f"Linked/Created Delivery Contact: {s_name}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Delivery Addr Error: {e}")
 
-    # 3. Address Logic (Invoice)
-    bill_addr = data.get('billing_address') or ship_addr
     invoice_id = partner_id
-
-    if bill_addr:
-        b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip() or bill_addr.get('name') or "Invoice Address"
+    if s_bill_addr:
+        b_name = f"{s_bill_addr.get('first_name', '')} {s_bill_addr.get('last_name', '')}".strip() or s_bill_addr.get('name') or "Invoice Address"
         billing_data = {
-            'name': b_name, 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
-            'zip': bill_addr.get('zip'), 'phone': bill_addr.get('phone'), 'country_code': bill_addr.get('country_code'), 'email': email
+            'name': b_name, 
+            'street': s_bill_addr.get('address1'), 
+            'city': s_bill_addr.get('city'),
+            'zip': s_bill_addr.get('zip'), 
+            'mobile': s_bill_addr.get('phone'), # Map to Mobile
+            'phone': '', # Keep Landline Empty
+            'country_code': s_bill_addr.get('country_code'), 
+            'email': email
         }
         try:
             found_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
             invoice_id = extract_id(found_id)
-            print(f"DEBUG: Resolved Invoice ID: {invoice_id}")
+            if invoice_id != partner_id:
+                 log_event('Customer', 'Info', f"Linked/Created Invoice Contact: {b_name}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Invoice Addr Error: {e}")
+    elif s_ship_addr:
+        invoice_id = shipping_id
 
-    # 4. Build Lines
+    # 5. Build Lines
     lines = []
     for item in data.get('line_items', []):
         product_id = odoo.search_product_by_sku(item.get('sku'), company_id)
@@ -192,7 +343,7 @@ def process_order_data(data):
 
     if not lines: return False, "No valid lines"
     
-    # 5. Sync Order
+    # 6. Sync Order
     notes = [f"Note: {data.get('note', '')}"]
     gateways = data.get('payment_gateway_names') or ([data.get('gateway')] if data.get('gateway') else [])
     if gateways: notes.append(f"Payment: {', '.join(gateways)}")
@@ -224,15 +375,48 @@ def process_order_data(data):
         log_event('Order', 'Error', str(e))
         return False, str(e)
 
+# --- AUTOMATION THREAD ---
+def auto_sync_worker():
+    """Background worker to auto-sync orders periodically"""
+    with app.app_context():
+        # Small initial delay to let server start
+        time.sleep(10)
+        print("--- Starting Auto-Sync Worker (Every 10 mins) ---")
+        
+        while True:
+            try:
+                # Fetch orders updated in the last 20 minutes to catch any misses
+                updated_min = (datetime.utcnow() - timedelta(minutes=20)).isoformat()
+                url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=any&updated_at_min={updated_min}&limit=25"
+                headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+                
+                res = requests.get(url, headers=headers)
+                if res.status_code == 200:
+                    orders = res.json().get('orders', [])
+                    for order in orders:
+                        try:
+                            # reuse the main process logic which checks if it exists before doing work
+                            process_order_data(order)
+                        except Exception as inner_e:
+                            print(f"Auto-Sync Single Order Error: {inner_e}")
+                else:
+                    print(f"Auto-Sync Shopify Error: {res.status_code}")
+                    
+            except Exception as e:
+                print(f"Auto-Sync Worker Error: {e}")
+            
+            # Sleep for 10 minutes
+            time.sleep(600)
+
 # --- ROUTES ---
 
 @app.route('/')
 def dashboard():
     try:
-        logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel', 'Shopify Update'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_customers = SyncLog.query.filter_by(entity='Customer').order_by(SyncLog.timestamp.desc()).limit(20).all()
-        logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer', 'Shopify Update'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
     except:
         logs_orders = logs_inventory = logs_customers = logs_system = []
     
@@ -240,142 +424,4 @@ def dashboard():
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
     current_settings = {
-        "locations": get_config('inventory_locations', default_locs),
-        "field": get_config('inventory_field', 'qty_available'),
-        "sync_zero": get_config('sync_zero_stock', False),
-        "combine_committed": get_config('combine_committed', False),
-        "company_id": get_config('odoo_company_id', None),
-        "cust_direction": get_config('cust_direction', 'bidirectional'),
-        "cust_auto_sync": get_config('cust_auto_sync', True)
-    }
-
-    odoo_status = True if odoo else False
-    return render_template('dashboard.html', 
-                           logs_orders=logs_orders, logs_inventory=logs_inventory, 
-                           logs_customers=logs_customers, logs_system=logs_system,
-                           odoo_status=odoo_status, current_settings=current_settings)
-
-@app.route('/api/odoo/companies', methods=['GET'])
-def api_get_companies():
-    if not odoo: return jsonify({"error": "Odoo Offline"}), 500
-    try: return jsonify(odoo.get_companies())
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
-@app.route('/api/odoo/locations', methods=['GET'])
-def api_get_locations():
-    if not odoo: return jsonify({"error": "Odoo Offline"}), 500
-    try:
-        company_id = request.args.get('company_id')
-        locs = odoo.get_locations(company_id)
-        return jsonify(locs)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/settings/save', methods=['POST'])
-def api_save_settings():
-    data = request.json
-    set_config('inventory_locations', data.get('locations', []))
-    set_config('inventory_field', data.get('field', 'qty_available'))
-    set_config('sync_zero_stock', data.get('sync_zero', False))
-    set_config('combine_committed', data.get('combine_committed', False))
-    set_config('odoo_company_id', data.get('company_id'))
-    set_config('cust_direction', data.get('cust_direction'))
-    set_config('cust_auto_sync', data.get('cust_auto_sync'))
-    return jsonify({"message": "Settings Saved"})
-
-@app.route('/sync/inventory', methods=['GET'])
-def sync_inventory():
-    if not odoo: return jsonify({"error": "Offline"}), 500
-    
-    target_locations = get_config('inventory_locations', [])
-    target_field = get_config('inventory_field', 'qty_available')
-    sync_zero = get_config('sync_zero_stock', False)
-    company_id = get_config('odoo_company_id', None)
-    
-    if not company_id:
-        try:
-            u = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
-            if u: company_id = u[0]['company_id'][0]
-        except: pass
-
-    last_run = datetime.utcnow() - timedelta(minutes=35)
-    try: 
-        product_ids = odoo.get_changed_products(str(last_run), company_id)
-    except: return jsonify({"error": "Read Failed"}), 500
-    
-    count = 0
-    for p_id in product_ids:
-        total = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
-        if sync_zero and total <= 0: continue
-        count += 1
-        if count <= 3:
-             p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'product.product', 'read', [p_id], {'fields': ['default_code']})
-             sku = p_data[0].get('default_code')
-             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total}")
-    return jsonify({"synced": count})
-
-@app.route('/sync/orders/manual', methods=['GET'])
-def manual_order_fetch():
-    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=10"
-    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
-    res = requests.get(url, headers=headers)
-    orders = res.json().get('orders', []) if res.status_code == 200 else []
-    
-    mapped_orders = []
-    for o in orders:
-        status = "Not Synced"
-        try:
-            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', 'ilike', o['name']]]])
-            if exists: status = "Synced"
-        except: pass
-        if o.get('cancelled_at'): status = "Cancelled (Skipped)"
-        mapped_orders.append({'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status})
-    return jsonify({"orders": mapped_orders})
-
-@app.route('/sync/orders/import_batch', methods=['POST'])
-def import_selected_orders():
-    ids = request.json.get('order_ids', [])
-    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
-    synced = 0
-    for oid in ids:
-        res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
-        if res.status_code == 200:
-            success, _ = process_order_data(res.json().get('order'))
-            if success: synced += 1
-    return jsonify({"message": f"Batch Complete. Synced: {synced}"})
-
-@app.route('/webhook/orders', methods=['POST'])
-@app.route('/webhook/orders/updated', methods=['POST'])
-def order_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    process_order_data(request.json)
-    return "Received", 200
-
-@app.route('/webhook/orders/cancelled', methods=['POST'])
-def order_cancelled_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    data = request.json
-    client_ref = f"ONLINE_{data.get('name')}"
-    order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref], ['state', '!=', 'cancel']]])
-    if order_ids:
-        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'action_cancel', [order_ids])
-        log_event('Order Cancel', 'Success', f"Cancelled {client_ref}")
-    return "Cancelled", 200
-
-@app.route('/webhook/refunds', methods=['POST'])
-def refund_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    log_event('Refund', 'Info', "Refund webhook received")
-    return "Received", 200
-
-@app.route('/test/simulate_order', methods=['POST'])
-def test_sim_dummy():
-     return jsonify({})
-
-@app.route('/sync/order_status', methods=['GET'])
-def sync_order_status():
-    return jsonify({"status": "Checked"})
-
-if __name__ == '__main__':
-    app.run(debug=True)
+        "locations": get_config('inventory_locations', default_
