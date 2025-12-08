@@ -192,23 +192,34 @@ def dashboard():
     env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
     default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
     
-    current_locations = get_config('inventory_locations', default_locs)
-    current_field = get_config('inventory_field', 'qty_available')
+    current_settings = {
+        "locations": get_config('inventory_locations', default_locs),
+        "field": get_config('inventory_field', 'qty_available'),
+        "sync_zero": get_config('sync_zero_stock', False),
+        "combine_committed": get_config('combine_committed', False),
+        "company_id": get_config('odoo_company_id', None) # New setting
+    }
 
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
                            logs_orders=logs_orders, logs_inventory=logs_inventory, 
                            logs_customers=logs_customers, logs_system=logs_system,
-                           odoo_status=odoo_status, 
-                           current_locations=current_locations,
-                           current_field=current_field)
+                           odoo_status=odoo_status, current_settings=current_settings)
 
 # --- SETTINGS API ---
+@app.route('/api/odoo/companies', methods=['GET'])
+def api_get_companies():
+    if not odoo: return jsonify({"error": "Odoo Offline"}), 500
+    try: return jsonify(odoo.get_companies())
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
 @app.route('/api/odoo/locations', methods=['GET'])
 def api_get_locations():
     if not odoo: return jsonify({"error": "Odoo Offline"}), 500
     try:
-        locs = odoo.get_locations()
+        # Check if a specific company is requested
+        company_id = request.args.get('company_id')
+        locs = odoo.get_locations(company_id)
         return jsonify(locs)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -216,47 +227,69 @@ def api_get_locations():
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
     data = request.json
-    if 'locations' in data:
-        set_config('inventory_locations', data['locations'])
-    if 'field' in data:
-        set_config('inventory_field', data['field'])
+    set_config('inventory_locations', data.get('locations', []))
+    set_config('inventory_field', data.get('field', 'qty_available'))
+    set_config('sync_zero_stock', data.get('sync_zero', False))
+    set_config('combine_committed', data.get('combine_committed', False))
+    set_config('odoo_company_id', data.get('company_id')) # Save Company ID
     return jsonify({"message": "Settings Saved"})
 
-@app.route('/test/simulate_order', methods=['POST'])
-def simulate_order():
-    if not odoo: return jsonify({"message": "Odoo Offline"}), 500
-    try:
-        test_email = os.getenv('ODOO_USERNAME') 
-        partner = odoo.search_partner_by_email(test_email)
-        status = 'Success' if partner else 'Warning'
-        msg = f"Connection Test: Found Admin ID {partner['id']}" if partner else "Connection Test: Admin email not found"
-        log_event('Test Connection', status, msg)
-        return jsonify({"message": msg})
-    except Exception as e:
-        return jsonify({"message": f"Test Failed: {str(e)}"}), 500
+@app.route('/sync/inventory', methods=['GET'])
+def sync_inventory():
+    if not odoo: return jsonify({"error": "Offline"}), 500
+    
+    # Load Settings from DB
+    env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
+    default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
+    
+    target_locations = get_config('inventory_locations', default_locs)
+    target_field = get_config('inventory_field', 'qty_available')
+    sync_zero = get_config('sync_zero_stock', False)
 
+    last_run = datetime.utcnow() - timedelta(minutes=35)
+    try: product_ids = odoo.get_changed_products(str(last_run))
+    except: return jsonify({"error": "Read Failed"}), 500
+    
+    count = 0
+    for p_id in product_ids:
+        total = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+        
+        if sync_zero and total <= 0: continue
+
+        count += 1
+        if count <= 3:
+             p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'read', [p_id], {'fields': ['default_code']})
+             sku = p_data[0].get('default_code')
+             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total} ({target_field})")
+
+    return jsonify({"synced": count})
+
+# (Keep manual sync and webhook routes from previous version)
 @app.route('/sync/orders/manual', methods=['GET'])
 def manual_order_fetch():
-    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=5"
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?status=open&limit=10"
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     res = requests.get(url, headers=headers)
-    if res.status_code != 200: return jsonify({"error": "Shopify Error"}), 500
+    orders = res.json().get('orders', []) if res.status_code == 200 else []
     
-    orders = res.json().get('orders', [])
-    synced = 0
-    for order in orders:
-        success, _ = process_order_data(order)
-        if success: synced += 1
-    return jsonify({"message": f"Processed {len(orders)}. Synced: {synced}"})
+    mapped_orders = []
+    for o in orders:
+        status = "Not Synced"
+        try:
+            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', 'ilike', o['name']]]])
+            if exists: status = "Synced"
+        except: pass
+        mapped_orders.append({'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status})
+    return jsonify({"orders": mapped_orders})
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
-    selected_ids = request.json.get('order_ids', [])
+    ids = request.json.get('order_ids', [])
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     synced = 0
-    for order_id in selected_ids:
-        url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{order_id}.json"
-        res = requests.get(url, headers=headers)
+    for oid in ids:
+        res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
         if res.status_code == 200:
             success, _ = process_order_data(res.json().get('order'))
             if success: synced += 1
@@ -285,32 +318,9 @@ def refund_webhook():
     log_event('Refund', 'Info', "Refund webhook received")
     return "Received", 200
 
-@app.route('/sync/inventory', methods=['GET'])
-def sync_inventory():
-    if not odoo: return jsonify({"error": "Offline"}), 500
-    
-    # Load Settings from DB
-    env_locs = os.getenv('ODOO_STOCK_LOCATION_IDS', '0')
-    default_locs = [int(x) for x in env_locs.split(',') if x.strip().isdigit()]
-    
-    target_locations = get_config('inventory_locations', default_locs)
-    target_field = get_config('inventory_field', 'qty_available')
-
-    last_run = datetime.utcnow() - timedelta(minutes=35)
-    try: product_ids = odoo.get_changed_products(str(last_run))
-    except: return jsonify({"error": "Read Failed"}), 500
-    
-    count = 0
-    for p_id in product_ids:
-        total = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
-        count += 1
-        if count <= 3:
-             p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'product.product', 'read', [p_id], {'fields': ['default_code']})
-             sku = p_data[0].get('default_code')
-             log_event('Inventory', 'Info', f"Synced SKU {sku}: {total} ({target_field})")
-
-    return jsonify({"synced": count})
+@app.route('/test/simulate_order', methods=['POST'])
+def test_sim_dummy():
+     return jsonify({})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
