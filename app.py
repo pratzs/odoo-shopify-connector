@@ -52,8 +52,11 @@ def get_config(key, default=None):
     """Retrieve setting from DB, fallback to default"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
+        # Handle cases where value might be a simple string or JSON
+        try:
+            return json.loads(setting.value)
+        except:
+            return setting.value
     except:
         return default
 
@@ -64,6 +67,7 @@ def set_config(key, value):
         if not setting:
             setting = AppSetting(key=key)
             db.session.add(setting)
+        # Store complex data as JSON string
         setting.value = json.dumps(value)
         db.session.commit()
         return True
@@ -92,7 +96,7 @@ def process_order_data(data):
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # Load Company ID from Settings
+    # Load Company ID from Settings to prevent cross-company errors
     company_id = get_config('odoo_company_id')
     
     # FALLBACK: If no company configured, try to auto-detect from API User
@@ -101,7 +105,7 @@ def process_order_data(data):
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
             if user_info:
-                company_id = user_info[0]['company_id'][0] 
+                company_id = user_info[0]['company_id'][0] # [ID, Name]
         except Exception as e:
             print(f"DEBUG: Failed to auto-detect company: {e}")
 
@@ -200,6 +204,7 @@ def process_order_data(data):
             'note': "\n\n".join(notes)
         }
         
+        # Explicitly set the company_id on the order if configured or detected
         if company_id:
              order_vals['company_id'] = int(company_id)
 
@@ -275,8 +280,7 @@ def sync_inventory():
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
     company_id = get_config('odoo_company_id', None)
-
-    # If no company saved, try auto-detect
+    
     if not company_id:
         try:
             user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
