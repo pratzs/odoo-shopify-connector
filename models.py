@@ -20,6 +20,11 @@ class SyncLog(db.Model):
     __tablename__ = 'sync_logs'
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    entity = db.Column(db.String(50)) # 'Order', 'Product'
-    status = db.Column(db.String(20)) # 'Success', 'Failed'
+    entity = db.Column(db.String(50)) 
+    status = db.Column(db.String(20)) 
     message = db.Column(db.Text)
+
+class AppSetting(db.Model):
+    __tablename__ = 'app_settings'
+    key = db.Column(db.String(50), primary_key=True)
+    value = db.Column(db.Text) # Storing JSON strings or simple values
