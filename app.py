@@ -270,10 +270,6 @@ def refund_webhook():
     log_event('Refund', 'Info', "Refund webhook received")
     return "Received", 200
 
-@app.route('/test/simulate_order', methods=['POST'])
-def test_sim_dummy():
-     return jsonify({})
-
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
     return jsonify({"status": "Checked"})
