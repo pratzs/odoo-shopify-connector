@@ -9,18 +9,16 @@ class OdooClient:
         self.password = password
         self.context = ssl._create_unverified_context()
         
-        self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context)
+        # FIX: Added allow_none=True to prevent crashes when fields are empty (None)
+        self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
-        self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context)
+        self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     def search_partner_by_email(self, email):
-        """Finds a customer by email. Returns the first match."""
-        # We search for the email strictly
+        """Finds a customer and checks if they have a Parent Company"""
         ids = self.models.execute_kw(self.db, self.uid, self.password,
             'res.partner', 'search', [[['email', '=', email]]])
-        
         if ids:
-            # Get details to check if it has a parent
             partners = self.models.execute_kw(self.db, self.uid, self.password,
                 'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id']})
             return partners[0]
@@ -28,28 +26,26 @@ class OdooClient:
 
     def create_partner(self, vals):
         """Creates a new contact/company in Odoo"""
-        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
+        # Clean vals to ensure no None types slip through if allow_none fails on some Odoo versions
+        # We replace None with False (Odoo standard for empty)
+        clean_vals = {k: (v if v is not None else False) for k, v in vals.items()}
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [clean_vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
-        """
-        Checks if a child address exists for this parent. If not, creates it.
-        address_data expected: {'street': ..., 'city': ..., 'zip': ..., 'phone': ..., 'name': ...}
-        """
-        # 1. Search existing children of this parent
+        """Checks if a child address exists for this parent. If not, creates it."""
+        # 1. Search existing children
         domain = [
             ['parent_id', '=', parent_id],
             ['type', '=', type],
             ['street', '=', address_data.get('street')],
             ['zip', '=', address_data.get('zip')]
         ]
-        
-        existing_ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'res.partner', 'search', [domain])
+        existing_ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
 
         if existing_ids:
             return existing_ids[0]
         
-        # 2. If not found, Create New Child
+        # 2. Create New Child
         vals = {
             'parent_id': parent_id,
             'type': type,
@@ -57,20 +53,21 @@ class OdooClient:
             'street': address_data.get('street'),
             'city': address_data.get('city'),
             'zip': address_data.get('zip'),
-            'country_code': address_data.get('country_code'), # e.g. 'NZ'
+            'country_code': address_data.get('country_code'),
             'phone': address_data.get('phone'),
-            'email': address_data.get('email') # Child often shares email or has none
+            'email': address_data.get('email')
         }
         
-        # Resolve Country ID if code provided
+        # Resolve Country ID
         if vals.get('country_code'):
             country_ids = self.models.execute_kw(self.db, self.uid, self.password,
                 'res.country', 'search', [[['code', '=', vals['country_code']]]])
-            if country_ids:
-                vals['country_id'] = country_ids[0]
+            if country_ids: vals['country_id'] = country_ids[0]
             del vals['country_code']
 
-        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
+        # Clean None values
+        clean_vals = {k: (v if v is not None else False) for k, v in vals.items()}
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [clean_vals])
 
     def search_product_by_sku(self, sku, company_id=None):
         if company_id:
@@ -89,7 +86,10 @@ class OdooClient:
         return ids[0] if ids else None
 
     def create_service_product(self, name, company_id=None):
-        vals = {'name': name, 'type': 'service', 'invoice_policy': 'order', 'list_price': 0.0, 'sale_ok': True}
+        vals = {
+            'name': name, 'type': 'service', 'invoice_policy': 'order', 
+            'list_price': 0.0, 'sale_ok': True, 'purchase_ok': False
+        }
         if company_id: vals['company_id'] = int(company_id)
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
