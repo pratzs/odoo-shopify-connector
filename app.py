@@ -114,7 +114,6 @@ def process_order_data(data):
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-        # UPDATE LOGIC: Removed the 'return True' here so we can proceed to update logic below
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
@@ -162,8 +161,12 @@ def process_order_data(data):
     shipping_id = partner_id # Default to parent
     
     if ship_addr:
+        # Improved Name Logic
+        s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip()
+        if not s_name: s_name = ship_addr.get('name', 'Delivery Address')
+
         shipping_data = {
-            'name': f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip(),
+            'name': s_name,
             'street': ship_addr.get('address1'),
             'city': ship_addr.get('city'),
             'zip': ship_addr.get('zip'),
@@ -172,7 +175,10 @@ def process_order_data(data):
             'email': email
         }
         try:
-            shipping_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
+            found_shipping_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
+            if found_shipping_id:
+                shipping_id = found_shipping_id
+                print(f"DEBUG: Delivery Address ID: {shipping_id}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Could not create Delivery Address: {e}")
             # shipping_id remains partner_id
@@ -182,8 +188,11 @@ def process_order_data(data):
     invoice_id = partner_id # Default to parent
 
     if bill_addr:
+        b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip()
+        if not b_name: b_name = bill_addr.get('name', 'Invoice Address')
+        
         billing_data = {
-            'name': f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip(),
+            'name': b_name,
             'street': bill_addr.get('address1'),
             'city': bill_addr.get('city'),
             'zip': bill_addr.get('zip'),
@@ -192,7 +201,10 @@ def process_order_data(data):
             'email': email
         }
         try:
-            invoice_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
+            found_invoice_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
+            if found_invoice_id:
+                invoice_id = found_invoice_id
+                print(f"DEBUG: Invoice Address ID: {invoice_id}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Could not create Invoice Address: {e}")
             # invoice_id remains partner_id
