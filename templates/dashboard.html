@@ -182,9 +182,9 @@
                                     <div class="mb-3">
                                         <label class="form-label small fw-bold">Customer Sync Direction</label>
                                         <select class="form-select" id="custSyncDirection">
-                                            <option value="bidirectional" selected>Bidirectional (Odoo Master)</option>
-                                            <option value="odoo_to_shopify">Odoo → Shopify</option>
-                                            <option value="shopify_to_odoo">Shopify → Odoo</option>
+                                            <option value="bidirectional" {% if current_settings.cust_direction == 'bidirectional' %}selected{% endif %}>Bidirectional (Odoo Master)</option>
+                                            <option value="odoo_to_shopify" {% if current_settings.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
+                                            <option value="shopify_to_odoo" {% if current_settings.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
                                         </select>
                                         <div class="form-text">Controls how customer data flows. Bidirectional treats Odoo as the source of truth.</div>
                                     </div>
@@ -202,12 +202,12 @@
                                     </div>
 
                                     <div class="form-check form-switch mb-2">
-                                        <input class="form-check-input" type="checkbox" id="custAutoSync">
+                                        <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
                                         <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync</label>
                                         <div class="form-text">Automatically sync customers from Odoo to Shopify once daily.</div>
                                     </div>
                                     <div class="form-check form-switch">
-                                        <input class="form-check-input" type="checkbox" id="custSyncTags">
+                                        <input class="form-check-input" type="checkbox" id="custSyncTags" {% if current_settings.cust_sync_tags %}checked{% endif %}>
                                         <label class="form-check-label fw-bold" for="custSyncTags">Sync Customer Tags</label>
                                         <div class="form-text">Select specific customer tags to sync. Leave disabled to sync all.</div>
                                     </div>
@@ -310,20 +310,7 @@
                 if(utc) el.innerText = formatNZT(utc);
             });
             // Apply saved settings to inputs
-            if (SAVED_SETTINGS) {
-                if (SAVED_SETTINGS.field) document.getElementById('invType').value = SAVED_SETTINGS.field;
-                if (SAVED_SETTINGS.sync_zero !== undefined) document.getElementById('checkZeroStock').checked = SAVED_SETTINGS.sync_zero;
-                if (SAVED_SETTINGS.combine_committed !== undefined) document.getElementById('checkCommitted').checked = SAVED_SETTINGS.combine_committed;
-                
-                // Customer Settings
-                if (SAVED_SETTINGS.cust_direction) document.getElementById('custSyncDirection').value = SAVED_SETTINGS.cust_direction;
-                if (SAVED_SETTINGS.cust_option) {
-                    const opt = document.querySelector(`input[name="custSyncOption"][value="${SAVED_SETTINGS.cust_option}"]`);
-                    if(opt) opt.checked = true;
-                }
-                if (SAVED_SETTINGS.cust_auto_sync !== undefined) document.getElementById('custAutoSync').checked = SAVED_SETTINGS.cust_auto_sync;
-                if (SAVED_SETTINGS.cust_sync_tags !== undefined) document.getElementById('custSyncTags').checked = SAVED_SETTINGS.cust_sync_tags;
-            }
+            // (Note: Other settings applied inline via templating, JS handles location checks)
         });
 
         // --- Settings Tab Logic ---
