@@ -38,18 +38,20 @@ class OdooClient:
             'product.product', 'search', [domain])
 
     def get_companies(self):
-        """Fetches list of all companies available in Odoo"""
+        """Fetches list of all companies"""
         return self.models.execute_kw(self.db, self.uid, self.password,
             'res.company', 'search_read', [[]], 
             {'fields': ['id', 'name']})
 
     def get_locations(self, company_id=None):
-        """Fetches internal locations, optionally filtered by Company ID"""
-        domain = [['usage', '=', 'internal']]
-        
-        if company_id:
-            # Filter by the specific company selected in Dashboard
-            domain.append(['company_id', '=', int(company_id)])
+        """
+        SAFETY UPDATE: Only fetches locations if a Company ID is provided.
+        Prevents crashing the server by loading thousands of locations at once.
+        """
+        if not company_id:
+            return [] # Return empty if no company selected to save memory
+
+        domain = [['usage', '=', 'internal'], ['company_id', '=', int(company_id)]]
         
         return self.models.execute_kw(self.db, self.uid, self.password,
             'stock.location', 'search_read', [domain], 
