@@ -114,6 +114,7 @@ def process_order_data(data):
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+        # UPDATE LOGIC: Removed the 'return True' here so we can proceed to update logic below
     except Exception as e:
         return False, f"Odoo Connection Error: {str(e)}"
 
@@ -324,7 +325,9 @@ def dashboard():
         "field": get_config('inventory_field', 'qty_available'),
         "sync_zero": get_config('sync_zero_stock', False),
         "combine_committed": get_config('combine_committed', False),
-        "company_id": get_config('odoo_company_id', None)
+        "company_id": get_config('odoo_company_id', None),
+        "cust_direction": get_config('cust_direction', 'bidirectional'),
+        "cust_auto_sync": get_config('cust_auto_sync', True)
     }
 
     odoo_status = True if odoo else False
