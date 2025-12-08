@@ -132,19 +132,35 @@ def process_order_data(data):
 
     if not lines: return False, "No valid lines to sync"
 
-    # 4. Create Order
-    notes = []
-    if data.get('note'): notes.append(f"Note: {data['note']}")
-    if data.get('payment_gateway_names'): notes.append(f"Payment: {', '.join(data['payment_gateway_names'])}")
+    # 4. Create Order with Notes (Updated)
+    notes_list = []
+    
+    # Customer Note
+    customer_note = data.get('note')
+    if customer_note: 
+        notes_list.append(f"Customer Note: {customer_note}")
+    
+    # Payment Method (Robust Check)
+    payment_methods = data.get('payment_gateway_names')
+    if not payment_methods:
+        # Fallback to 'gateway' if list is empty
+        gateway = data.get('gateway')
+        if gateway:
+            payment_methods = [gateway]
+            
+    if payment_methods:
+        notes_list.append(f"Payment Method: {', '.join(payment_methods)}")
+        
+    final_note = "\n\n".join(notes_list)
     
     try:
         odoo.create_sale_order({
             'name': client_ref, 'client_order_ref': client_ref,
             'partner_id': main_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
             'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 
-            'note': "\n".join(notes)
+            'note': final_note 
         })
-        log_event('Order', 'Success', f"Synced {client_ref} to Odoo ID {main_id}")
+        log_event('Order', 'Success', f"Synced {client_ref} to Odoo ID {main_id}. Note: {len(final_note)} chars")
         return True, "Synced"
     except Exception as e:
         log_event('Order', 'Error', f"Failed to create {client_ref}: {str(e)}")
@@ -155,7 +171,6 @@ def process_order_data(data):
 @app.route('/')
 def dashboard():
     # Fetch logs separated by category for the UI tabs
-    # THIS BLOCK WAS MISSING IN THE PREVIOUS FILE
     try:
         logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
