@@ -7,7 +7,6 @@ class OdooClient:
         self.db = db
         self.username = username
         self.password = password
-        # Fix for some free hosting SSL contexts
         self.context = ssl._create_unverified_context()
         
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context)
@@ -24,44 +23,25 @@ class OdooClient:
         return None
 
     def search_product_by_sku(self, sku, company_id=None):
-        """Finds product ID by SKU, filtering by Company if provided (Fixed Syntax)"""
         if company_id:
-            domain = [
-                '&', 
-                ['default_code', '=', sku], 
-                '|', 
-                ['company_id', '=', int(company_id)], 
-                ['company_id', '=', False]
-            ]
+            domain = ['&', ['default_code', '=', sku], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
         else:
             domain = [['default_code', '=', sku]]
-
-        ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'product.product', 'search', [domain])
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
     def search_product_by_name(self, name, company_id=None):
-        """Finds product ID by Name, filtering by Company if provided (Fixed Syntax)"""
         if company_id:
-            domain = [
-                '&', 
-                ['name', 'ilike', name], 
-                '|', 
-                ['company_id', '=', int(company_id)], 
-                ['company_id', '=', False]
-            ]
+            domain = ['&', ['name', 'ilike', name], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
         else:
             domain = [['name', 'ilike', name]]
-
-        ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'product.product', 'search', [domain])
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
     def create_service_product(self, name, company_id=None):
-        """Creates a new Service product for shipping charges"""
         vals = {
             'name': name,
-            'type': 'service',  
+            'type': 'service',
             'invoice_policy': 'order',
             'list_price': 0.0,
             'sale_ok': True,
@@ -69,47 +49,28 @@ class OdooClient:
         }
         if company_id:
             vals['company_id'] = int(company_id)
-        
-        return self.models.execute_kw(self.db, self.uid, self.password, 
-            'product.product', 'create', [vals])
+        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def get_changed_products(self, time_limit_str, company_id=None):
-        """Finds IDs of products changed recently, filtered by Company."""
         if company_id:
-            domain = [
-                '&',
-                '&', 
-                ['write_date', '>', time_limit_str], 
-                ['type', '=', 'product'],
-                '|',
-                ['company_id', '=', int(company_id)],
-                ['company_id', '=', False]
-            ]
+            domain = ['&', '&', ['write_date', '>', time_limit_str], ['type', '=', 'product'], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
         else:
             domain = [('write_date', '>', time_limit_str), ('type', '=', 'product')]
-
-        return self.models.execute_kw(self.db, self.uid, self.password,
-            'product.product', 'search', [domain])
+        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_companies(self):
-        return self.models.execute_kw(self.db, self.uid, self.password,
-            'res.company', 'search_read', [[]], 
-            {'fields': ['id', 'name']})
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
 
     def get_locations(self, company_id=None):
         if not company_id: return []
         domain = [['usage', '=', 'internal'], ['company_id', '=', int(company_id)]]
-        return self.models.execute_kw(self.db, self.uid, self.password,
-            'stock.location', 'search_read', [domain], 
-            {'fields': ['id', 'complete_name', 'company_id']})
+        return self.models.execute_kw(self.db, self.uid, self.password, 'stock.location', 'search_read', [domain], {'fields': ['id', 'complete_name', 'company_id']})
 
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
         total_qty = 0
         for loc_id in location_ids:
             context = {'location': loc_id}
-            data = self.models.execute_kw(self.db, self.uid, self.password,
-                'product.product', 'read', [product_id],
-                {'fields': [field_name], 'context': context})
+            data = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'read', [product_id], {'fields': [field_name], 'context': context})
             if data:
                 total_qty += data[0].get(field_name, 0)
         return total_qty
