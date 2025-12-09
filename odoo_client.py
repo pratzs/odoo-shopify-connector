@@ -15,8 +15,9 @@ class OdooClient:
         self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     def search_partner_by_email(self, email):
+        # UPDATED: Added ['active', '=', True] to ignore archived customers
         ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'res.partner', 'search', [[['email', '=', email]]])
+            'res.partner', 'search', [[['email', '=', email], ['active', '=', True]]])
         if ids:
             partners = self.models.execute_kw(self.db, self.uid, self.password,
                 'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id', 'user_id']})
@@ -34,26 +35,23 @@ class OdooClient:
 
     def create_partner(self, vals):
         """Creates a new contact/company in Odoo"""
-        # Clean vals: Ensure no None types for critical fields if needed, 
-        # though allow_none handles most. We resolve country first.
         self._resolve_country(vals)
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
         """Checks if a child address exists. If not, creates it."""
-        # 1. Search existing children to avoid duplicates
-        # We only search by Street to be lenient (Zip can be inconsistent)
+        # UPDATED: Added ['active', '=', True] to ignore archived addresses
         domain = [
             ['parent_id', '=', parent_id],
             ['type', '=', type],
-            ['street', '=', address_data.get('street')]
+            ['street', '=', address_data.get('street')],
+            ['active', '=', True]
         ]
         existing_ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
 
         if existing_ids:
             return existing_ids[0]
         
-        # 2. Create New Child
         vals = {
             'parent_id': parent_id,
             'type': type,
@@ -74,31 +72,34 @@ class OdooClient:
         """Helper to find Odoo Country ID from ISO code"""
         code = vals.get('country_code')
         if code:
-            # Try searching by Code (NZ)
             ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', code]]])
             if not ids:
-                 # Try searching by Name (New Zealand)
                  ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['name', 'ilike', code]]])
             
             if ids:
                 vals['country_id'] = ids[0]
-            
-            # Remove the code key as Odoo doesn't use it for creation
             del vals['country_code']
 
     def search_product_by_sku(self, sku, company_id=None):
+        # UPDATED: Added ['active', '=', True]
+        domain = [['default_code', '=', sku], ['active', '=', True]]
         if company_id:
-            domain = ['&', ['default_code', '=', sku], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
-        else:
-            domain = [['default_code', '=', sku]]
+            # Add company logic: (company_id == ID OR company_id == False)
+            domain.append('|')
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False])
+            
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
     def search_product_by_name(self, name, company_id=None):
+        # UPDATED: Added ['active', '=', True]
+        domain = [['name', 'ilike', name], ['active', '=', True]]
         if company_id:
-            domain = ['&', ['name', 'ilike', name], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
-        else:
-            domain = [['name', 'ilike', name]]
+            domain.append('|')
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False])
+            
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
@@ -111,10 +112,22 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def get_changed_products(self, time_limit_str, company_id=None):
+        # UPDATED: Added ['active', '=', True] just in case
+        # (Usually write_date check implies active, but safer to be explicit)
+        domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), ('active', '=', True)]
         if company_id:
-            domain = ['&', '&', ['write_date', '>', time_limit_str], ['type', '=', 'product'], '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
-        else:
-            domain = [('write_date', '>', time_limit_str), ('type', '=', 'product')]
+            # If company_id is provided, we need to restructure for the OR logic
+            # Using Odoo's polish notation for: (write > time) AND (type = product) AND (active = True) AND (company=ID OR company=False)
+            domain = [
+                '&', '&', '&',
+                ('write_date', '>', time_limit_str), 
+                ('type', '=', 'product'),
+                ('active', '=', True),
+                '|', 
+                ('company_id', '=', int(company_id)), 
+                ('company_id', '=', False)
+            ]
+            
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_companies(self):
