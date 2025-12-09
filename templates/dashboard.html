@@ -90,13 +90,18 @@
                             <i class="bi bi-box-seam"></i> Force Inventory Sync
                         </button>
                         
-                        <!-- Product Actions (NEW) -->
+                        <!-- Product Actions -->
                         <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark">
                             <i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)
                         </button>
                         
                         <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger">
                             <i class="bi bi-trash"></i> Archive Duplicate SKUs
+                        </button>
+
+                        <!-- Customer Actions (NEW MANUAL SYNC BUTTON) -->
+                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success">
+                            <i class="bi bi-people"></i> Force Customer Sync
                         </button>
 
                         <!-- System Actions -->
@@ -129,7 +134,7 @@
                         {% else %}<div class="p-3 text-danger">Error: Logs not loaded from backend.</div>{% endif %}
                     </div>
 
-                    <!-- Products Tab (NEW) -->
+                    <!-- Products Tab -->
                     <div class="tab-pane fade" id="products">
                         {% if logs_products is defined %}{{ render_log_table(logs_products) }}
                         {% else %}<div class="p-3 text-muted text-center">No product logs available.</div>{% endif %}
@@ -216,7 +221,7 @@
 
                                     <div class="form-check form-switch mb-2">
                                         <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
-                                        <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync</label>
+                                        <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync (Daily)</label>
                                     </div>
                                     
                                     <!-- Sync Tags Switch -->
@@ -327,6 +332,8 @@
                 const utc = el.getAttribute('data-utc');
                 if(utc) el.innerText = formatLocalTime(utc);
             });
+            // Initial call to hide/show tag fields based on saved setting
+            toggleTagFields();
         });
 
         // --- Tag Field Toggle ---
@@ -390,7 +397,7 @@
 
         function saveSettings() {
             const companyId = document.getElementById('companySelect').value;
-            const field = document.querySelector('input[name="invType"]:checked') ? document.querySelector('input[name="invType"]:checked').value : 'qty_available';
+            const field = document.querySelector('#invType').value;
             const syncZero = document.getElementById('checkZeroStock').checked;
             const combineCommitted = document.getElementById('checkCommitted').checked;
             const locations = Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value));
@@ -407,7 +414,6 @@
                 whitelistTags = document.getElementById('custWhitelistTags').value;
                 blacklistTags = document.getElementById('custBlacklistTags').value;
             }
-
 
             if (!companyId) { alert("Please select a Company first."); return; }
 
