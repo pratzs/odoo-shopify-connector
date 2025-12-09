@@ -191,6 +191,7 @@ def process_order_data(data):
         try:
             found_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
             shipping_id = extract_id(found_id)
+            print(f"DEBUG: Resolved Delivery ID: {shipping_id}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Delivery Addr Error: {e}")
 
@@ -207,6 +208,7 @@ def process_order_data(data):
         try:
             found_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
             invoice_id = extract_id(found_id)
+            print(f"DEBUG: Resolved Invoice ID: {invoice_id}")
         except Exception as e:
             log_event('Customer', 'Warning', f"Invoice Addr Error: {e}")
 
@@ -243,18 +245,30 @@ def process_order_data(data):
                 log_event('Product', 'Error', f"Failed to create SKU {sku}: {e}")
 
         if product_id:
-            # --- YOUR STABLE DISCOUNT LOGIC ---
-            price = float(item.get('price', 0))
+            # --- HIGH-FIDELITY DISCOUNT CALCULATION ---
+            price_unit_net = float(item.get('price', 0)) 
             qty = int(item.get('quantity', 1))
-            disc = float(item.get('total_discount', 0))
-            pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
+            total_discount_amount = float(item.get('total_discount', 0))
+            
+            price_unit_odoo = price_unit_net
+            discount_percentage = 0.0
+
+            if qty > 0 and total_discount_amount > 0:
+                unit_discount = total_discount_amount / qty
+                price_original = price_unit_net + unit_discount
+
+                if price_original > 0:
+                    discount_percentage = round((unit_discount / price_original) * 100, 6) 
+                    price_unit_odoo = price_original
+                    
+                log_event('Order', 'Info', f"Discount calculated for {sku}: {round(discount_percentage, 4)}% on original price {price_unit_odoo}.")
             
             lines.append((0, 0, {
                 'product_id': product_id, 
                 'product_uom_qty': qty, 
-                'price_unit': price, 
+                'price_unit': price_unit_odoo, 
                 'name': item['name'], 
-                'discount': pct
+                'discount': discount_percentage 
             }))
         else:
             log_event('Order', 'Warning', f"Skipped line {sku}: Could not create/find active product.")
@@ -275,6 +289,13 @@ def process_order_data(data):
         'note': "\n\n".join(notes)
     }
     if company_id: vals['company_id'] = int(company_id)
+    
+    # FIX DUPLICATE ORDERS: Re-check existence right before creation 
+    # to catch race conditions from parallel webhooks
+    try:
+        existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+    except: pass
     
     try:
         if existing_ids:
@@ -297,10 +318,8 @@ def process_order_data(data):
         log_event('Order', 'Error', str(e))
         return False, str(e)
 
-# --- NEW: Product Sync Logic (Updated with Mappings) ---
-
 def sync_products_master():
-    """Odoo -> Shopify Product Sync"""
+    """Odoo is Master: Pushes all Odoo products to Shopify (Updates Status and Metafields)"""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Product Sync Failed: Connection Error")
@@ -320,27 +339,29 @@ def sync_products_master():
             shopify_id = find_shopify_product_by_sku(sku)
             
             try:
+                # 1. Fetch/Create Shopify Product
                 if shopify_id:
                     sp = shopify.Product.find(shopify_id)
                 else:
                     if target_status == 'archived': continue
                     sp = shopify.Product()
                 
-                # --- MAPPING START ---
+                # 2. Map Core Data
                 sp.title = p['name']
                 sp.body_html = p.get('description_sale') or ''
                 
-                # 1. Product Type -> Ecommerce Category
+                # Product Type Mapping
                 categ_name = odoo.get_public_category_name(p.get('public_categ_ids'))
                 sp.product_type = categ_name if categ_name else 'Storable Product'
                 
-                # 2. Vendor -> First word of Vendor Name
+                # Vendor Mapping
                 vendor_name = odoo.get_vendor_name(p.get('product_tmpl_id')[0])
                 sp.vendor = vendor_name.split()[0] if vendor_name else 'Odoo Master'
 
                 sp.status = target_status
                 sp.save()
                 
+                # 3. Handle Variant Data
                 if sp.variants:
                     variant = sp.variants[0]
                 else:
@@ -355,7 +376,7 @@ def sync_products_master():
                 variant.product_id = sp.id
                 variant.save()
                 
-                # 3. Inventory Sync
+                # Inventory Sync
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
                     qty = int(p.get('qty_available', 0))
                     try:
@@ -364,9 +385,9 @@ def sync_products_master():
                             inventory_item_id=variant.inventory_item_id,
                             available=qty
                         )
-                    except: pass # Inventory set might fail if loc not set up
-                
-                # 4. Image Sync (Only if missing)
+                    except: pass
+
+                # Image Sync
                 if not sp.images:
                     img_data = odoo.get_product_image(p['id'])
                     if img_data:
@@ -375,7 +396,7 @@ def sync_products_master():
                         image.product_id = sp.id
                         image.save()
                 
-                # 5. Metafield Sync (Vendor Code)
+                # 4. Sync Vendor Product Code to Metafield
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                 if vendor_code:
                     metafield = shopify.Metafield({
@@ -387,7 +408,6 @@ def sync_products_master():
                         'owner_id': sp.id
                     })
                     metafield.save()
-                # --- MAPPING END ---
 
                 synced += 1
             except Exception as e:
@@ -474,6 +494,7 @@ def sync_customers_master():
         log_event('Customer Sync', 'Success', f"Customer Sync Complete. Processed {synced_count} updates.")
 
 def archive_shopify_duplicates():
+    """Duplicate Scanner"""
     with app.app_context():
         if not setup_shopify_session(): return
         log_event('Duplicate Scan', 'Info', "Starting Scan...")
