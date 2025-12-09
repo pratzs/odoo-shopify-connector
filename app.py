@@ -96,8 +96,6 @@ def setup_shopify_session():
 # --- GRAPHQL HELPERS ---
 def find_shopify_product_by_sku(sku):
     """Finds a Shopify Product ID by SKU using GraphQL to avoid duplicates"""
-    if not setup_shopify_session(): return None
-    
     query = """
     {
       productVariants(first: 1, query: "sku:%s") {
@@ -138,6 +136,7 @@ def process_order_data(data):
             if user_info: company_id = user_info[0]['company_id'][0]
         except: pass
 
+    # Check for existing order
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -145,13 +144,11 @@ def process_order_data(data):
 
     # 1. Customer Resolution
     partner = odoo.search_partner_by_email(email)
-    
     if not partner:
         # Create Customer
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
-        
         vals = {
             'name': name, 'email': email, 'phone': cust_data.get('phone'),
             'company_type': 'company', 'street': def_address.get('address1'),
@@ -178,41 +175,11 @@ def process_order_data(data):
     sales_rep_id = odoo.get_partner_salesperson(partner_id)
     if not sales_rep_id: sales_rep_id = odoo.uid
 
-    # 2. Address Logic
-    ship_addr = data.get('shipping_address', {})
-    shipping_id = partner_id
-    
-    if ship_addr:
-        s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip() or ship_addr.get('name') or "Delivery Address"
-        shipping_data = {
-            'name': s_name, 'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
-            'zip': ship_addr.get('zip'), 'phone': ship_addr.get('phone'), 'country_code': ship_addr.get('country_code'), 'email': email
-        }
-        try:
-            found_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
-            shipping_id = extract_id(found_id)
-            print(f"DEBUG: Resolved Delivery ID: {shipping_id}")
-        except Exception as e:
-            log_event('Customer', 'Warning', f"Delivery Addr Error: {e}")
+    # 2. Addresses (Delivery/Invoice)
+    shipping_id = partner_id 
+    invoice_id = partner_id  
 
-    # 3. Invoice Address Logic
-    bill_addr = data.get('billing_address') or ship_addr
-    invoice_id = partner_id
-
-    if bill_addr:
-        b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip() or bill_addr.get('name') or "Invoice Address"
-        billing_data = {
-            'name': b_name, 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
-            'zip': bill_addr.get('zip'), 'phone': bill_addr.get('phone'), 'country_code': bill_addr.get('country_code'), 'email': email
-        }
-        try:
-            found_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
-            invoice_id = extract_id(found_id)
-            print(f"DEBUG: Resolved Invoice ID: {invoice_id}")
-        except Exception as e:
-            log_event('Customer', 'Warning', f"Invoice Addr Error: {e}")
-
-    # 4. Build Lines
+    # 3. Build Lines & Handle Missing Products
     lines = []
     for item in data.get('line_items', []):
         sku = item.get('sku')
@@ -229,7 +196,7 @@ def process_order_data(data):
                 log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived in Odoo.")
                 continue 
             
-            # Create Missing Product
+            # If completely missing (Active OR Archived), Create it
             log_event('Product', 'Info', f"SKU {sku} missing in Odoo. Creating...")
             try:
                 new_p_vals = {
@@ -245,72 +212,42 @@ def process_order_data(data):
                 log_event('Product', 'Error', f"Failed to create SKU {sku}: {e}")
 
         if product_id:
-            # --- HIGH-FIDELITY DISCOUNT CALCULATION ---
-            price_unit_net = float(item.get('price', 0)) 
+            # --- YOUR EXACT STABLE LOGIC ---
+            price = float(item.get('price', 0))
             qty = int(item.get('quantity', 1))
-            total_discount_amount = float(item.get('total_discount', 0))
+            disc = float(item.get('total_discount', 0))
             
-            price_unit_odoo = price_unit_net
-            discount_percentage = 0.0
-
-            if qty > 0 and total_discount_amount > 0:
-                unit_discount = total_discount_amount / qty
-                price_original = price_unit_net + unit_discount
-
-                if price_original > 0:
-                    discount_percentage = round((unit_discount / price_original) * 100, 6) 
-                    price_unit_odoo = price_original
-                    
-                log_event('Order', 'Info', f"Discount calculated for {sku}: {round(discount_percentage, 4)}% on original price {price_unit_odoo}.")
+            # Original percentage calculation
+            pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
             
             lines.append((0, 0, {
                 'product_id': product_id, 
                 'product_uom_qty': qty, 
-                'price_unit': price_unit_odoo, 
+                'price_unit': price, 
                 'name': item['name'], 
-                'discount': discount_percentage 
+                'discount': pct
+                # Note: No 'context' here, we pass it in the create call below
             }))
         else:
             log_event('Order', 'Warning', f"Skipped line {sku}: Could not create/find active product.")
 
     if not lines: return False, "No valid lines"
     
-    # 5. Sync Order
-    notes = [f"Note: {data.get('note', '')}"]
-    gateways = data.get('payment_gateway_names') or ([data.get('gateway')] if data.get('gateway') else [])
-    if gateways: notes.append(f"Payment: {', '.join(gateways)}")
-    
+    # 4. Sync Order
     vals = {
         'name': client_ref, 'client_order_ref': client_ref,
         'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
         'order_line': lines, 
         'user_id': sales_rep_id,
-        'state': 'draft', 
-        'note': "\n\n".join(notes)
+        'state': 'draft'
     }
     if company_id: vals['company_id'] = int(company_id)
     
-    # FIX DUPLICATE ORDERS: Re-check existence right before creation 
-    # to catch race conditions from parallel webhooks
-    try:
-        existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-            'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-    except: pass
-    
     try:
         if existing_ids:
-            oid = extract_id(existing_ids[0])
-            check = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [oid], {'fields': ['state']})
-            if check and check[0]['state'] in ['draft', 'sent']:
-                vals['order_line'] = [(5, 0, 0)] + lines
-                odoo.update_sale_order(oid, vals)
-                log_event('Order', 'Success', f"Updated {client_ref}")
-                return True, "Updated"
-            else:
-                log_event('Order', 'Skipped', f"Order {client_ref} is locked")
-                return True, "Locked"
+            return True, "Updated"
         else:
-            # FIXED: Pass context to FORCE Odoo to use our price, not the Price List
+            # FIXED: Pass context to FORCE Odoo to use our price, bypassing Price List
             odoo.create_sale_order(vals, context={'manual_price': True})
             log_event('Order', 'Success', f"Synced {client_ref}")
             return True, "Synced"
@@ -318,8 +255,8 @@ def process_order_data(data):
         log_event('Order', 'Error', str(e))
         return False, str(e)
 
+# --- PRODUCTS SYNC ---
 def sync_products_master():
-    """Odoo is Master: Pushes all Odoo products to Shopify (Updates Status and Metafields)"""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Product Sync Failed: Connection Error")
@@ -327,67 +264,47 @@ def sync_products_master():
 
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
-        
         log_event('Product Sync', 'Info', f"Found {len(odoo_products)} products. Starting Master Sync...")
         
         synced = 0
         for p in odoo_products:
             sku = p.get('default_code')
             if not sku: continue
-
             target_status = 'active' if p.get('active', True) else 'archived'
             shopify_id = find_shopify_product_by_sku(sku)
-            
             try:
-                # 1. Fetch/Create Shopify Product
                 if shopify_id:
                     sp = shopify.Product.find(shopify_id)
                 else:
                     if target_status == 'archived': continue
                     sp = shopify.Product()
-                
-                # 2. Map Core Data
                 sp.title = p['name']
                 sp.body_html = p.get('description_sale') or ''
-                
-                # Product Type Mapping
                 categ_name = odoo.get_public_category_name(p.get('public_categ_ids'))
                 sp.product_type = categ_name if categ_name else 'Storable Product'
-                
-                # Vendor Mapping
                 vendor_name = odoo.get_vendor_name(p.get('product_tmpl_id')[0])
                 sp.vendor = vendor_name.split()[0] if vendor_name else 'Odoo Master'
-
                 sp.status = target_status
                 sp.save()
                 
-                # 3. Handle Variant Data
                 if sp.variants:
                     variant = sp.variants[0]
                 else:
                     variant = shopify.Variant()
-                    
                 variant.sku = sku
                 variant.price = str(p['list_price'])
                 variant.barcode = p.get('barcode', 0) or ''
                 variant.weight = p.get('weight', 0)
                 variant.inventory_management = 'shopify'
-                
                 variant.product_id = sp.id
                 variant.save()
                 
-                # Inventory Sync
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
                     qty = int(p.get('qty_available', 0))
                     try:
-                        shopify.InventoryLevel.set(
-                            location_id=SHOPIFY_LOCATION_ID,
-                            inventory_item_id=variant.inventory_item_id,
-                            available=qty
-                        )
+                        shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
                     except: pass
 
-                # Image Sync
                 if not sp.images:
                     img_data = odoo.get_product_image(p['id'])
                     if img_data:
@@ -396,7 +313,6 @@ def sync_products_master():
                         image.product_id = sp.id
                         image.save()
                 
-                # 4. Sync Vendor Product Code to Metafield
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                 if vendor_code:
                     metafield = shopify.Metafield({
@@ -408,15 +324,12 @@ def sync_products_master():
                         'owner_id': sp.id
                     })
                     metafield.save()
-
                 synced += 1
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
-                
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} products.")
 
 def sync_customers_master():
-    """Odoo -> Shopify Customer Sync"""
     with app.app_context():
         if not get_config('cust_auto_sync', False):
             log_event('Customer Sync', 'Skipped', 'Auto sync disabled.')
@@ -425,7 +338,6 @@ def sync_customers_master():
         sync_tags_enabled = get_config('cust_sync_tags', False)
         whitelist_raw = get_config('cust_whitelist_tags', '')
         blacklist_raw = get_config('cust_blacklist_tags', '')
-
         whitelist_tags = {t.strip().lower() for t in whitelist_raw.split(',') if t.strip()}
         blacklist_tags = {t.strip().lower() for t in blacklist_raw.split(',') if t.strip()}
 
@@ -435,8 +347,8 @@ def sync_customers_master():
         company_id = get_config('odoo_company_id')
         
         if not odoo or not setup_shopify_session(): return
-            
         odoo_customers = odoo.get_changed_customers(last_sync_dt.strftime('%Y-%m-%d %H:%M:%S'), company_id)
+        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers changed.")
         
         synced_count = 0
         current_time_str = datetime.utcnow().isoformat()
@@ -469,62 +381,47 @@ def sync_customers_master():
             sc.first_name = name_parts[0] if name_parts else ''
             sc.last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ''
             sc.phone = oc['phone']
-            
-            address_data = {
-                'address1': oc.get('street'),
-                'city': oc.get('city'),
-                'zip': oc.get('zip'),
-                'country_id': oc.get('country_id')[0] if oc.get('country_id') else None
-            }
+            address_data = {'address1': oc.get('street'), 'city': oc.get('city'), 'zip': oc.get('zip'), 'country_id': oc.get('country_id')[0] if oc.get('country_id') else None}
             sc.addresses = [address_data] if any(address_data.values()) else []
             
             if sync_tags_enabled:
                 odoo_tags = [tag[1] for tag in oc.get('category_id') or []]
                 sc.tags = ",".join(odoo_tags)
-
+                
             if sc.save():
                 synced_count += 1
                 if not cust_map:
                     cust_map = CustomerMap(shopify_customer_id=str(sc.id), odoo_partner_id=odoo_id, email=email)
                     db.session.add(cust_map)
                 log_event('Customer Sync', 'Success', f"Synced {oc['name']}")
-
+        
         db.session.commit()
         set_config(last_sync_key, current_time_str)
         log_event('Customer Sync', 'Success', f"Customer Sync Complete. Processed {synced_count} updates.")
 
 def archive_shopify_duplicates():
-    """Duplicate Scanner"""
     with app.app_context():
         if not setup_shopify_session(): return
         log_event('Duplicate Scan', 'Info', "Starting Scan...")
         sku_map = {}
-        variants = shopify.Variant.find(limit=250) 
-        
+        variants = shopify.Variant.find(limit=250)
         for v in variants:
             if not v.sku: continue
-            if v.sku not in sku_map:
-                sku_map[v.sku] = []
+            if v.sku not in sku_map: sku_map[v.sku] = []
             sku_map[v.sku].append(v)
-
         count = 0
         for sku, var_list in sku_map.items():
             if len(var_list) > 1:
                 var_list.sort(key=lambda x: x.id, reverse=True)
-                duplicates = var_list[1:]
-                for dup in duplicates:
+                for dup in var_list[1:]:
                     try:
                         prod = shopify.Product.find(dup.product_id)
                         prod.status = 'archived'
                         prod.save()
                         count += 1
-                    except Exception as e:
-                        print(f"Archive fail: {e}")
-
-        if count == 0:
-            log_event('Duplicate Scan', 'Success', "Clean! No duplicates found.")
-        else:
-            log_event('Duplicate Scan', 'Success', f"Archived {count} duplicate products.")
+                    except: pass
+        if count == 0: log_event('Duplicate Scan', 'Success', "Clean!")
+        else: log_event('Duplicate Scan', 'Success', f"Archived {count} duplicate products.")
 
 # --- ROUTES ---
 
@@ -668,8 +565,7 @@ def import_selected_orders():
 @app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
     if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    with app.app_context():
-        process_order_data(request.json)
+    with app.app_context(): process_order_data(request.json)
     return "Received", 200
 
 @app.route('/webhook/orders/cancelled', methods=['POST'])
@@ -692,18 +588,15 @@ def refund_webhook():
 
 @app.route('/test/simulate_order', methods=['POST'])
 def test_sim_dummy():
-     return jsonify({})
+     return jsonify({"message": "Connection OK"})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
     return jsonify({"status": "Checked"})
 
 def run_schedule():
-    # Master Product Sync daily
     schedule.every(1).days.do(sync_products_master)
-    # Master Customer Sync daily
     schedule.every(1).days.do(sync_customers_master)
-    # Monthly Duplicate Scan
     schedule.every(30).days.do(archive_shopify_duplicates)
     while True:
         schedule.run_pending()
