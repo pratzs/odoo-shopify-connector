@@ -84,7 +84,6 @@ class OdooClient:
         # UPDATED: Added ['active', '=', True]
         domain = [['default_code', '=', sku], ['active', '=', True]]
         if company_id:
-            # Add company logic: (company_id == ID OR company_id == False)
             domain.append('|')
             domain.append(['company_id', '=', int(company_id)])
             domain.append(['company_id', '=', False])
@@ -111,13 +110,36 @@ class OdooClient:
         if company_id: vals['company_id'] = int(company_id)
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
+    def create_product(self, vals):
+        """Creates a standard Storable Product in Odoo (Used when Shopify sends new SKU)"""
+        if 'type' not in vals:
+            vals['type'] = 'product'  # Default to storable
+        if 'invoice_policy' not in vals:
+            vals['invoice_policy'] = 'delivery'
+        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
+
+    def get_all_products(self, company_id=None):
+        """Fetches ALL active products for Master Sync"""
+        domain = [('active', '=', True), ('type', '=', 'product'), ('default_code', '!=', False)]
+        if company_id:
+            # (active AND type AND sku) AND (company=ID OR company=False)
+            domain = [
+                '&', '&', '&',
+                ('active', '=', True),
+                ('type', '=', 'product'),
+                ('default_code', '!=', False),
+                '|',
+                ('company_id', '=', int(company_id)),
+                ('company_id', '=', False)
+            ]
+        
+        # We need specific fields for syncing to Shopify
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale']
+        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
+
     def get_changed_products(self, time_limit_str, company_id=None):
-        # UPDATED: Added ['active', '=', True] just in case
-        # (Usually write_date check implies active, but safer to be explicit)
         domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), ('active', '=', True)]
         if company_id:
-            # If company_id is provided, we need to restructure for the OR logic
-            # Using Odoo's polish notation for: (write > time) AND (type = product) AND (active = True) AND (company=ID OR company=False)
             domain = [
                 '&', '&', '&',
                 ('write_date', '>', time_limit_str), 
