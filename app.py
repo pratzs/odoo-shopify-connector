@@ -96,6 +96,8 @@ def setup_shopify_session():
 # --- GRAPHQL HELPERS ---
 def find_shopify_product_by_sku(sku):
     """Finds a Shopify Product ID by SKU using GraphQL to avoid duplicates"""
+    if not setup_shopify_session(): return None
+    
     query = """
     {
       productVariants(first: 1, query: "sku:%s") {
@@ -144,11 +146,13 @@ def process_order_data(data):
 
     # 1. Customer Resolution
     partner = odoo.search_partner_by_email(email)
+    
     if not partner:
         # Create Customer
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
+        
         vals = {
             'name': name, 'email': email, 'phone': cust_data.get('phone'),
             'company_type': 'company', 'street': def_address.get('address1'),
@@ -175,11 +179,41 @@ def process_order_data(data):
     sales_rep_id = odoo.get_partner_salesperson(partner_id)
     if not sales_rep_id: sales_rep_id = odoo.uid
 
-    # 2. Addresses (Delivery/Invoice)
-    shipping_id = partner_id 
-    invoice_id = partner_id  
+    # 2. Address Logic
+    ship_addr = data.get('shipping_address', {})
+    shipping_id = partner_id
+    
+    if ship_addr:
+        s_name = f"{ship_addr.get('first_name', '')} {ship_addr.get('last_name', '')}".strip() or ship_addr.get('name') or "Delivery Address"
+        shipping_data = {
+            'name': s_name, 'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
+            'zip': ship_addr.get('zip'), 'phone': ship_addr.get('phone'), 'country_code': ship_addr.get('country_code'), 'email': email
+        }
+        try:
+            found_id = odoo.find_or_create_child_address(partner_id, shipping_data, type='delivery')
+            shipping_id = extract_id(found_id)
+            print(f"DEBUG: Resolved Delivery ID: {shipping_id}")
+        except Exception as e:
+            log_event('Customer', 'Warning', f"Delivery Addr Error: {e}")
 
-    # 3. Build Lines & Handle Missing Products
+    # 3. Invoice Address Logic
+    bill_addr = data.get('billing_address') or ship_addr
+    invoice_id = partner_id
+
+    if bill_addr:
+        b_name = f"{bill_addr.get('first_name', '')} {bill_addr.get('last_name', '')}".strip() or bill_addr.get('name') or "Invoice Address"
+        billing_data = {
+            'name': b_name, 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
+            'zip': bill_addr.get('zip'), 'phone': bill_addr.get('phone'), 'country_code': bill_addr.get('country_code'), 'email': email
+        }
+        try:
+            found_id = odoo.find_or_create_child_address(partner_id, billing_data, type='invoice')
+            invoice_id = extract_id(found_id)
+            print(f"DEBUG: Resolved Invoice ID: {invoice_id}")
+        except Exception as e:
+            log_event('Customer', 'Warning', f"Invoice Addr Error: {e}")
+
+    # 4. Build Lines
     lines = []
     for item in data.get('line_items', []):
         sku = item.get('sku')
@@ -196,7 +230,7 @@ def process_order_data(data):
                 log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived in Odoo.")
                 continue 
             
-            # If completely missing (Active OR Archived), Create it
+            # Create Missing Product
             log_event('Product', 'Info', f"SKU {sku} missing in Odoo. Creating...")
             try:
                 new_p_vals = {
@@ -233,19 +267,39 @@ def process_order_data(data):
 
     if not lines: return False, "No valid lines"
     
-    # 4. Sync Order
+    # 5. Sync Order
+    notes = [f"Note: {data.get('note', '')}"]
+    gateways = data.get('payment_gateway_names') or ([data.get('gateway')] if data.get('gateway') else [])
+    if gateways: notes.append(f"Payment: {', '.join(gateways)}")
+    
     vals = {
         'name': client_ref, 'client_order_ref': client_ref,
         'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
         'order_line': lines, 
         'user_id': sales_rep_id,
-        'state': 'draft'
+        'state': 'draft', 
+        'note': "\n\n".join(notes)
     }
     if company_id: vals['company_id'] = int(company_id)
     
+    # FIX DUPLICATE ORDERS: Check existence
+    try:
+        existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+    except: pass
+
     try:
         if existing_ids:
-            return True, "Updated"
+            oid = extract_id(existing_ids[0])
+            check = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [oid], {'fields': ['state']})
+            if check and check[0]['state'] in ['draft', 'sent']:
+                vals['order_line'] = [(5, 0, 0)] + lines
+                odoo.update_sale_order(oid, vals)
+                log_event('Order', 'Success', f"Updated {client_ref}")
+                return True, "Updated"
+            else:
+                log_event('Order', 'Skipped', f"Order {client_ref} is locked")
+                return True, "Locked"
         else:
             # FIXED: Pass context to FORCE Odoo to use our price, bypassing Price List
             odoo.create_sale_order(vals, context={'manual_price': True})
@@ -419,7 +473,8 @@ def archive_shopify_duplicates():
                         prod.status = 'archived'
                         prod.save()
                         count += 1
-                    except: pass
+                    except Exception as e:
+                        print(f"Archive fail: {e}")
         if count == 0: log_event('Duplicate Scan', 'Success', "Clean!")
         else: log_event('Duplicate Scan', 'Success', f"Archived {count} duplicate products.")
 
