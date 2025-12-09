@@ -19,8 +19,17 @@ class OdooClient:
             'res.partner', 'search', [[['email', '=', email]]])
         if ids:
             partners = self.models.execute_kw(self.db, self.uid, self.password,
-                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id']})
+                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id', 'user_id']})
             return partners[0]
+        return None
+
+    def get_partner_salesperson(self, partner_id):
+        """Fetches the Salesperson (user_id) for a specific partner/company"""
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'res.partner', 'read', [[partner_id]], {'fields': ['user_id']})
+        if data and data[0].get('user_id'):
+            # user_id is returned as a tuple (id, name), we want the ID at index 0
+            return data[0]['user_id'][0] 
         return None
 
     def create_partner(self, vals):
