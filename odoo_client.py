@@ -10,9 +10,19 @@ class OdooClient:
         self.context = ssl._create_unverified_context()
         
         # Enable allow_none to handle empty Shopify fields without crashing
+        # Common is used once for auth, so it can stay here
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
-        self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
+        
+        # REMOVED: self.models = ... (This caused the thread crash)
+
+    @property
+    def models(self):
+        """
+        Creates a fresh ServerProxy for every call. 
+        This prevents 'ResponseNotReady' errors in multi-threaded environments (Gunicorn/Flask).
+        """
+        return xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     def search_partner_by_email(self, email):
         # Strictly Active
@@ -25,21 +35,17 @@ class OdooClient:
         return None
 
     def get_partner_salesperson(self, partner_id):
-        """Fetches the Salesperson (user_id) for a specific partner/company"""
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'res.partner', 'read', [[partner_id]], {'fields': ['user_id']})
         if data and data[0].get('user_id'):
-            # user_id is returned as (id, name), we want the ID at index 0
             return data[0]['user_id'][0] 
         return None
 
     def create_partner(self, vals):
-        """Creates a new contact/company in Odoo"""
         self._resolve_country(vals)
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
-        """Checks if a child address exists (Active only). If not, creates it."""
         domain = [
             ['parent_id', '=', parent_id],
             ['type', '=', type],
@@ -67,7 +73,6 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def _resolve_country(self, vals):
-        """Helper to find Odoo Country ID from ISO code"""
         code = vals.get('country_code')
         if code:
             ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', code]]])
@@ -78,7 +83,6 @@ class OdooClient:
             del vals['country_code']
 
     def search_product_by_sku(self, sku, company_id=None):
-        """Strictly searches for ACTIVE products only."""
         domain = [['default_code', '=', sku], ['active', '=', True]]
         if company_id:
             domain.append('|')
@@ -89,7 +93,6 @@ class OdooClient:
         return ids[0] if ids else None
 
     def check_product_exists_by_sku(self, sku, company_id=None):
-        """Checks if a product exists (Active OR Archived) to prevent creation errors."""
         domain = [['default_code', '=', sku], '|', ['active', '=', True], ['active', '=', False]]
         if company_id:
             domain.append('|')
@@ -125,7 +128,6 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def get_vendor_product_code(self, product_id):
-        """Fetches the vendor product code (product_code) from the first supplier info record."""
         ids = self.models.execute_kw(self.db, self.uid, self.password, 
             'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]])
             
@@ -137,7 +139,6 @@ class OdooClient:
         return None
 
     def get_all_products(self, company_id=None):
-        """Fetches ALL products (Active & Archived) for Master Sync"""
         domain = [('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
             domain = [
@@ -152,7 +153,6 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
-        """Fetches changed products (Active & Archived) since time limit"""
         domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
             domain = [
@@ -168,7 +168,6 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_changed_customers(self, time_limit_str, company_id=None):
-        """Fetches customers (partners marked as customers) recently changed."""
         domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer', '=', True), ('active', '=', True)]
         if company_id:
             domain = [
@@ -204,7 +203,6 @@ class OdooClient:
         return total_qty
 
     def create_sale_order(self, order_vals, context=None):
-        """Creates a sale order, optionally passing context (e.g., to bypass price lists)"""
         kwargs = {}
         if context:
             kwargs['context'] = context
