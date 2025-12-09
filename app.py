@@ -243,7 +243,7 @@ def process_order_data(data):
         return False, str(e)
 
 def sync_products_master():
-    """Odoo is Master: Pushes all Odoo products to Shopify (Updates Status)"""
+    """Odoo is Master: Pushes all Odoo products to Shopify (Updates Status and Metafields)"""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Product Sync Failed: Connection Error")
@@ -263,20 +263,22 @@ def sync_products_master():
             shopify_id = find_shopify_product_by_sku(sku)
             
             try:
+                # 1. Fetch/Create Shopify Product
                 if shopify_id:
                     sp = shopify.Product.find(shopify_id)
                 else:
                     if target_status == 'archived': continue
                     sp = shopify.Product()
                 
+                # 2. Map Core Data
                 sp.title = p['name']
                 sp.body_html = p.get('description_sale') or ''
                 sp.product_type = 'Storable Product'
                 sp.vendor = 'Odoo Master'
                 sp.status = target_status
-                
                 sp.save()
                 
+                # 3. Handle Variant Data
                 if sp.variants:
                     variant = sp.variants[0]
                 else:
@@ -291,6 +293,23 @@ def sync_products_master():
                 variant.product_id = sp.id
                 variant.save()
                 
+                # 4. Sync Vendor Product Code to Metafield (NEW LOGIC)
+                # product_tmpl_id is fetched from Odoo product data (p)
+                vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
+                
+                if vendor_code:
+                    metafield = shopify.Metafield({
+                        'key': 'vendor_product_code',
+                        'value': vendor_code,
+                        'type': 'single_line_text_field',
+                        'namespace': 'custom',
+                        'owner_resource': 'product',
+                        'owner_id': sp.id
+                    })
+                    metafield.save()
+                    log_event('Product Sync', 'Info', f"Synced Vendor Code {vendor_code} for {sku}.")
+
+
                 synced += 1
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
@@ -397,7 +416,6 @@ def sync_customers_master():
                 sc.tags = ",".join(odoo_tags)
             else:
                 # If filtering is disabled, DO NOT touch the tags on Shopify.
-                # The existing sc.tags value (if loaded from Shopify) will be preserved upon sc.save()
                 pass
 
 
