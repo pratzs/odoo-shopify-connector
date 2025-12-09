@@ -213,8 +213,7 @@ def process_order_data(data):
                 log_event('Product', 'Error', f"Failed to create SKU {sku}: {e}")
 
         if product_id:
-            # --- HIGH-FIDELITY DISCOUNT CALCULATION ---
-            # Ensures percentage is calculated but line total matches Shopify
+            # --- HIGH-FIDELITY DISCOUNT CALCULATION (MUST SHOW PERCENTAGE) ---
             
             price_unit_net = float(item.get('price', 0)) 
             qty = int(item.get('quantity', 1))
@@ -232,19 +231,21 @@ def process_order_data(data):
 
                 if price_original > 0:
                     # 3. Calculate Percentage Discount
-                    discount_percentage = (unit_discount / price_original) * 100
+                    # Using round() to 6 decimal places for high precision to match Odoo's calculation
+                    discount_percentage = round((unit_discount / price_original) * 100, 6) 
                     
-                    # 4. Set Odoo Price Unit to Original Price
+                    # 4. Set Odoo Price Unit to Original Price (This is the critical price Odoo must use)
                     price_unit_odoo = price_original
                     
-                log_event('Order', 'Info', f"Discount calculated for {sku}: {round(discount_percentage, 2)}% on original price {price_unit_odoo}.")
+                log_event('Order', 'Info', f"Discount calculated for {sku}: {round(discount_percentage, 4)}% on original price {price_unit_odoo}.")
             
             lines.append((0, 0, {
                 'product_id': product_id, 
                 'product_uom_qty': qty, 
-                'price_unit': price_unit_odoo, # Original price
+                'price_unit': price_unit_odoo, # Original/List price
                 'name': item['name'], 
-                'discount': discount_percentage # Calculated percentage
+                'discount': discount_percentage, # Calculated percentage (high precision)
+                'context': {'manual_price': True} # CRITICAL: Forces Odoo to accept this price and bypass price list lookup
             }))
         else:
             log_event('Order', 'Warning', f"Skipped line {sku}: Could not create/find active product.")
@@ -323,7 +324,7 @@ def sync_products_master():
                 variant.product_id = sp.id
                 variant.save()
                 
-                # 4. Sync Vendor Product Code to Metafield (NEW LOGIC)
+                # 4. Sync Vendor Product Code to Metafield
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                 
                 if vendor_code:
