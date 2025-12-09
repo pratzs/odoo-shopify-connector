@@ -124,7 +124,14 @@ def process_order_data(data):
             log_event('Customer', 'Error', f"Create Failed: {e}")
             return False, f"Customer Error: {e}"
     
+    # Resolve the correct Parent ID (if this is a contact)
     partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+    
+    # --- SALESPERSON LOOKUP ---
+    # Fetch the salesperson assigned to this partner (or parent company)
+    sales_rep_id = odoo.get_partner_salesperson(partner_id)
+    if not sales_rep_id:
+        sales_rep_id = odoo.uid # Fallback to API User if no rep assigned
     
     # 2. Address Logic (Delivery)
     ship_addr = data.get('shipping_address', {})
@@ -200,7 +207,10 @@ def process_order_data(data):
     vals = {
         'name': client_ref, 'client_order_ref': client_ref,
         'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
-        'order_line': lines, 'user_id': odoo.uid, 'state': 'draft', 'note': "\n\n".join(notes)
+        'order_line': lines, 
+        'user_id': sales_rep_id, # UPDATED: Use the correct Sales Rep
+        'state': 'draft', 
+        'note': "\n\n".join(notes)
     }
     if company_id: vals['company_id'] = int(company_id)
     
@@ -218,7 +228,7 @@ def process_order_data(data):
                 return True, "Locked"
         else:
             odoo.create_sale_order(vals)
-            log_event('Order', 'Success', f"Synced {client_ref}")
+            log_event('Order', 'Success', f"Synced {client_ref} (Sales Rep ID: {sales_rep_id})")
             return True, "Synced"
     except Exception as e:
         log_event('Order', 'Error', str(e))
