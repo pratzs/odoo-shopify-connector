@@ -20,7 +20,7 @@ class OdooClient:
             'res.partner', 'search', [[['email', '=', email], ['active', '=', True]]])
         if ids:
             partners = self.models.execute_kw(self.db, self.uid, self.password,
-                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id', 'user_id']})
+                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id', 'user_id', 'category_id']})
             return partners[0]
         return None
 
@@ -85,7 +85,6 @@ class OdooClient:
 
     def check_product_exists_by_sku(self, sku, company_id=None):
         """Checks if a product exists (Active OR Archived) to prevent creation errors."""
-        # Note: We use '|', ('active', '=', True), ('active', '=', False) to find both
         domain = [['default_code', '=', sku], '|', ['active', '=', True], ['active', '=', False]]
         if company_id:
             domain.append('|')
@@ -122,12 +121,10 @@ class OdooClient:
 
     def get_vendor_product_code(self, product_id):
         """Fetches the vendor product code (product_code) from the first supplier info record."""
-        # Search for product.supplierinfo records linked to this product ID
         ids = self.models.execute_kw(self.db, self.uid, self.password, 
             'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]])
             
         if ids:
-            # Read the product_code field from the first record found
             data = self.models.execute_kw(self.db, self.uid, self.password, 
                 'product.supplierinfo', 'read', [ids[0]], {'fields': ['product_code']})
             if data and data[0].get('product_code'):
@@ -146,7 +143,6 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # We need product_tmpl_id to query product.supplierinfo (vendor codes)
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
@@ -180,6 +176,7 @@ class OdooClient:
                 ('company_id', '=', False)
             ]
         
+        # NOTE: Added 'category_id' to fields to support tag filtering/syncing
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
