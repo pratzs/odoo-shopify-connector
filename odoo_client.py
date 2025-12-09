@@ -12,7 +12,9 @@ class OdooClient:
         # Enable allow_none to handle empty Shopify fields without crashing
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
-        self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
+        
+        # IMPORTANT: self.models is NOT assigned here anymore because it is a @property below.
+        # This prevents the "property 'models' has no setter" error.
 
     @property
     def models(self):
@@ -140,7 +142,6 @@ class OdooClient:
         """Fetches the primary vendor name for a product template."""
         ids = self.models.execute_kw(self.db, self.uid, self.password, 
             'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]], {'limit': 1})
-            
         if ids:
             data = self.models.execute_kw(self.db, self.uid, self.password, 
                 'product.supplierinfo', 'read', [ids[0]], {'fields': ['partner_id']})
@@ -212,6 +213,7 @@ class OdooClient:
         
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
+
 
     def get_companies(self):
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
