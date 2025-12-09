@@ -305,6 +305,15 @@ def sync_customers_master():
             log_event('Customer Sync', 'Skipped', 'Auto sync disabled by configuration.')
             return
 
+        # Fetch filtering tags
+        sync_tags_enabled = get_config('cust_sync_tags', False)
+        whitelist_raw = get_config('cust_whitelist_tags', '')
+        blacklist_raw = get_config('cust_blacklist_tags', '')
+
+        # Process tags into sets for fast lookup (case-insensitive)
+        whitelist_tags = {t.strip().lower() for t in whitelist_raw.split(',') if t.strip()}
+        blacklist_tags = {t.strip().lower() for t in blacklist_raw.split(',') if t.strip()}
+
         last_sync_key = 'cust_last_sync'
         # Default to checking last 24 hours if no sync time saved
         last_sync_str = get_config(last_sync_key, (datetime.utcnow() - timedelta(hours=24)).isoformat())
@@ -325,6 +334,23 @@ def sync_customers_master():
         for oc in odoo_customers:
             odoo_id = oc['id']
             email = oc['email']
+
+            # --- TAG FILTERING LOGIC ---
+            if sync_tags_enabled:
+                # Odoo tags are fetched as a list of tuples: [(ID, Name), ...]
+                odoo_partner_tags = {tag[1].lower() for tag in oc.get('category_id') or []}
+
+                # 1. Blacklist Check: If customer has ANY blacklisted tag, SKIP.
+                if odoo_partner_tags.intersection(blacklist_tags):
+                    log_event('Customer Sync', 'Skipped', f"Skipping {oc['name']}: Matched Blacklist Tag.")
+                    continue
+                
+                # 2. Whitelist Check: If whitelist exists AND customer has NONE of them, SKIP.
+                # If whitelist_tags is empty, this check is skipped (default behavior: sync all)
+                if whitelist_tags and not odoo_partner_tags.intersection(whitelist_tags):
+                     log_event('Customer Sync', 'Skipped', f"Skipping {oc['name']}: Missing Whitelist Tag.")
+                     continue
+            # --- END TAG FILTERING ---
             
             # 1. Find Shopify ID using database map
             cust_map = CustomerMap.query.filter_by(odoo_partner_id=odoo_id).first()
@@ -361,17 +387,19 @@ def sync_customers_master():
                 'address1': oc.get('street'),
                 'city': oc.get('city'),
                 'zip': oc.get('zip'),
-                # Note: country_id in Odoo is (ID, Name), shopify expects country code/name
-                # We skip detailed country mapping here for simplicity unless Odoo client resolves it
                 'country_id': oc.get('country_id')[0] if oc.get('country_id') else None
             }
             sc.addresses = [address_data] if any(address_data.values()) else []
             
             # Map Odoo Partner Tags (Categories)
-            if get_config('cust_sync_tags', False):
-                # category_id in Odoo partner is [(id, name), ...]
+            if sync_tags_enabled:
                 odoo_tags = [tag[1] for tag in oc.get('category_id') or []]
                 sc.tags = ",".join(odoo_tags)
+            else:
+                # If filtering is disabled, DO NOT touch the tags on Shopify.
+                # The existing sc.tags value (if loaded from Shopify) will be preserved upon sc.save()
+                pass
+
 
             # 4. Save and Update Map
             if sc.save():
@@ -452,7 +480,10 @@ def dashboard():
         "combine_committed": get_config('combine_committed', False),
         "cust_direction": get_config('cust_direction', 'bidirectional'),
         "cust_auto_sync": get_config('cust_auto_sync', True),
-        "cust_sync_tags": get_config('cust_sync_tags', False)
+        "cust_sync_tags": get_config('cust_sync_tags', False),
+        # NEW CONFIGS
+        "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
+        "cust_blacklist_tags": get_config('cust_blacklist_tags', '')
     }
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
@@ -501,7 +532,10 @@ def api_save_settings():
     set_config('odoo_company_id', data.get('company_id'))
     set_config('cust_direction', data.get('cust_direction'))
     set_config('cust_auto_sync', data.get('cust_auto_sync'))
+    # UPDATED: Save the two new tag configuration keys
     set_config('cust_sync_tags', data.get('cust_sync_tags'))
+    set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
+    set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
     return jsonify({"message": "Settings Saved"})
 
 @app.route('/sync/inventory', methods=['GET'])
