@@ -120,13 +120,24 @@ class OdooClient:
             vals['invoice_policy'] = 'delivery'
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
+    def get_vendor_product_code(self, product_id):
+        """Fetches the vendor product code (product_code) from the first supplier info record."""
+        # Search for product.supplierinfo records linked to this product ID
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 
+            'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]])
+            
+        if ids:
+            # Read the product_code field from the first record found
+            data = self.models.execute_kw(self.db, self.uid, self.password, 
+                'product.supplierinfo', 'read', [ids[0]], {'fields': ['product_code']})
+            if data and data[0].get('product_code'):
+                return data[0]['product_code']
+        return None
+
     def get_all_products(self, company_id=None):
         """Fetches ALL products (Active & Archived) for Master Sync"""
-        # Note: We fetch both active=True and active=False to sync archival status
         domain = [('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
-            # Reconstruct for Company logic
-            # (Type=Product AND SKU!=False AND (Active=True OR Active=False) AND (Company=ID OR Company=False))
             domain = [
                 '&', '&', '&',
                 ('type', '=', 'product'),
@@ -135,8 +146,8 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # We include 'active' field to know status
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active']
+        # We need product_tmpl_id to query product.supplierinfo (vendor codes)
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
