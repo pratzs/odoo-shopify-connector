@@ -155,6 +155,24 @@ class OdooClient:
             
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
+    def get_changed_customers(self, time_limit_str, company_id=None):
+        """Fetches customers (partners marked as customers) recently changed."""
+        domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer', '=', True), ('active', '=', True)]
+        if company_id:
+            domain = [
+                '&', '&', '&',
+                ('write_date', '>', time_limit_str), 
+                ('is_company', '=', True),
+                ('customer', '=', True),
+                '|', 
+                ('company_id', '=', int(company_id)), 
+                ('company_id', '=', False)
+            ]
+        
+        fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
+
+
     def get_companies(self):
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
 
