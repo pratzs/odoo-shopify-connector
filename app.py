@@ -214,8 +214,11 @@ def process_order_data(data):
 
         if product_id:
             # --- PRICE CONSISTENCY FIX: Use Net Price Paid ---
-            # This ensures Odoo line total matches Shopify line total exactly, 
-            # avoiding internal Odoo price list logic and rounding errors.
+            # To ensure Odoo line total matches Shopify line total exactly, 
+            # we set Odoo's price_unit to the NET price (after discount)
+            # and set the discount percentage to 0.0.
+            
+            # Use 'price' field which is the unit price after all line discounts
             price_unit_net = float(item.get('price', 0)) 
             qty = int(item.get('quantity', 1))
             
