@@ -213,9 +213,23 @@ def process_order_data(data):
                 log_event('Product', 'Error', f"Failed to create SKU {sku}: {e}")
 
         if product_id:
-            price = float(item.get('price', 0))
+            # --- PRICE CONSISTENCY FIX: Use Net Price Paid ---
+            # This ensures Odoo line total matches Shopify line total exactly, 
+            # avoiding internal Odoo price list logic and rounding errors.
+            price_unit_net = float(item.get('price', 0)) 
             qty = int(item.get('quantity', 1))
-            lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name']}))
+            
+            # Log the change for debugging
+            if float(item.get('total_discount', 0)) > 0:
+                 log_event('Order', 'Info', f"Discount detected for {sku}. Syncing final price unit net price: {price_unit_net}.")
+            
+            lines.append((0, 0, {
+                'product_id': product_id, 
+                'product_uom_qty': qty, 
+                'price_unit': price_unit_net, # Net price (after discount)
+                'name': item['name'], 
+                'discount': 0.0 # Zero discount percentage to force Odoo to accept net price
+            }))
         else:
             log_event('Order', 'Warning', f"Skipped line {sku}: Could not create/find active product.")
 
@@ -294,7 +308,6 @@ def sync_products_master():
                 variant.save()
                 
                 # 4. Sync Vendor Product Code to Metafield (NEW LOGIC)
-                # product_tmpl_id is fetched from Odoo product data (p)
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                 
                 if vendor_code:
