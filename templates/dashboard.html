@@ -99,7 +99,7 @@
                             <i class="bi bi-trash"></i> Archive Duplicate SKUs
                         </button>
 
-                        <!-- Customer Actions (NEW MANUAL SYNC BUTTON) -->
+                        <!-- Customer Actions -->
                         <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success">
                             <i class="bi bi-people"></i> Force Customer Sync
                         </button>
@@ -452,10 +452,32 @@
         }
         function runBatchImport() {
             const selected = Array.from(document.querySelectorAll('.order-select:checked')).map(cb => cb.value);
-            if (selected.length === 0) return;
+            if (selected.length === 0) {
+                 showToast("Please select at least one order to import.");
+                 return;
+            }
+            
+            // Show a progress message while fetching and queuing the sync
+            document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Importing...</td></tr>';
+
             fetch('/sync/orders/import_batch', {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ order_ids: selected })
-            }).then(r => r.json()).then(data => { modal.hide(); showToast(data.message); setTimeout(() => location.reload(), 2000); });
+                method: 'POST', 
+                headers: {'Content-Type': 'application/json'}, 
+                body: JSON.stringify({ order_ids: selected })
+            })
+            .then(r => r.json())
+            .then(data => { 
+                modal.hide(); 
+                showToast(data.message); 
+                // Delay reload slightly to allow background thread to start logging
+                setTimeout(() => location.reload(), 2000); 
+            })
+            .catch(error => {
+                modal.hide(); 
+                showToast("Import failed due to a network error.");
+                console.error("Import Batch Error:", error);
+                setTimeout(() => location.reload(), 2000); 
+            });
         }
         function triggerAction(url, method='GET') {
             fetch(url, { method: method }).then(r => r.json()).then(data => showToast(data.message)).catch(e => showToast("Error"));
