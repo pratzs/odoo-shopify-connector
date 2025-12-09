@@ -25,17 +25,21 @@ class OdooClient:
         return None
 
     def get_partner_salesperson(self, partner_id):
+        """Fetches the Salesperson (user_id) for a specific partner/company"""
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'res.partner', 'read', [[partner_id]], {'fields': ['user_id']})
         if data and data[0].get('user_id'):
+            # user_id is returned as (id, name), we want the ID at index 0
             return data[0]['user_id'][0] 
         return None
 
     def create_partner(self, vals):
+        """Creates a new contact/company in Odoo"""
         self._resolve_country(vals)
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
+        """Checks if a child address exists (Active only). If not, creates it."""
         domain = [
             ['parent_id', '=', parent_id],
             ['type', '=', type],
@@ -63,6 +67,7 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def _resolve_country(self, vals):
+        """Helper to find Odoo Country ID from ISO code"""
         code = vals.get('country_code')
         if code:
             ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', code]]])
@@ -198,8 +203,8 @@ class OdooClient:
             if data: total_qty += data[0].get(field_name, 0)
         return total_qty
 
-    # UPDATED: Accepts optional context
     def create_sale_order(self, order_vals, context=None):
+        """Creates a sale order, optionally passing context (e.g., to bypass price lists)"""
         kwargs = {}
         if context:
             kwargs['context'] = context
