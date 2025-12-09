@@ -10,11 +10,9 @@ class OdooClient:
         self.context = ssl._create_unverified_context()
         
         # Enable allow_none to handle empty Shopify fields without crashing
-        # Common is used once for auth, so it can stay here
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
-        
-        # REMOVED: self.models = ... (This caused the thread crash)
+        self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     @property
     def models(self):
@@ -138,6 +136,37 @@ class OdooClient:
                 return data[0]['product_code']
         return None
 
+    def get_vendor_name(self, product_id):
+        """Fetches the primary vendor name for a product template."""
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 
+            'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]], {'limit': 1})
+            
+        if ids:
+            data = self.models.execute_kw(self.db, self.uid, self.password, 
+                'product.supplierinfo', 'read', [ids[0]], {'fields': ['partner_id']})
+            # partner_id is (id, name)
+            if data and data[0].get('partner_id'):
+                return data[0]['partner_id'][1]
+        return None
+
+    def get_public_category_name(self, category_ids):
+        """Fetches the name of the first public category (Ecommerce category)."""
+        if not category_ids: return None
+        # category_ids is a list of IDs. We just take the first one.
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'product.public.category', 'read', [category_ids[0]], {'fields': ['name']})
+        if data:
+            return data[0]['name']
+        return None
+
+    def get_product_image(self, product_id):
+        """Fetches the base64 image_1920 for a specific product."""
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'product.product', 'read', [product_id], {'fields': ['image_1920']})
+        if data and data[0].get('image_1920'):
+            return data[0]['image_1920']
+        return None
+
     def get_all_products(self, company_id=None):
         domain = [('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
@@ -149,7 +178,8 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id']
+        # Added 'qty_available' and 'public_categ_ids' to support new mappings
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
@@ -182,7 +212,6 @@ class OdooClient:
         
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
-
 
     def get_companies(self):
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
