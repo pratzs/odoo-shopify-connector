@@ -218,9 +218,27 @@
                                         <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
                                         <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync</label>
                                     </div>
-                                    <div class="form-check form-switch">
-                                        <input class="form-check-input" type="checkbox" id="custSyncTags" {% if current_settings.cust_sync_tags %}checked{% endif %}>
-                                        <label class="form-check-label fw-bold" for="custSyncTags">Sync Customer Tags</label>
+                                    
+                                    <!-- Sync Tags Switch -->
+                                    <div class="form-check form-switch mt-3">
+                                        <input class="form-check-input" type="checkbox" id="custSyncTagsSwitch" {% if current_settings.cust_sync_tags %}checked{% endif %} onchange="toggleTagFields()">
+                                        <label class="form-check-label fw-bold" for="custSyncTagsSwitch">Enable Tag Filtering</label>
+                                    </div>
+
+                                    <!-- Tag Filtering Fields (Controlled by toggleTagFields JS) -->
+                                    <div id="tagFilterFields" class="mt-3 p-3 border rounded" style="{% if not current_settings.cust_sync_tags %}display: none;{% endif %}">
+                                        
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-bold" for="custWhitelistTags">Tags to Import (Whitelist)</label>
+                                            <textarea class="form-control" id="custWhitelistTags" rows="2" placeholder="tag1, tag2, tag3">{% if current_settings.cust_whitelist_tags %}{{ current_settings.cust_whitelist_tags }}{% endif %}</textarea>
+                                            <div class="form-text">If specified, ONLY sync customers possessing AT LEAST ONE of these tags.</div>
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-bold" for="custBlacklistTags">Tags to Exclude (Blacklist)</label>
+                                            <textarea class="form-control" id="custBlacklistTags" rows="2" placeholder="tagA, tagB, tagC">{% if current_settings.cust_blacklist_tags %}{{ current_settings.cust_blacklist_tags }}{% endif %}</textarea>
+                                            <div class="form-text">If specified, SKIP customers possessing AT LEAST ONE of these tags.</div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -311,6 +329,13 @@
             });
         });
 
+        // --- Tag Field Toggle ---
+        function toggleTagFields() {
+            const toggle = document.getElementById('custSyncTagsSwitch').checked;
+            const fields = document.getElementById('tagFilterFields');
+            fields.style.display = toggle ? 'block' : 'none';
+        }
+
         // --- Settings Tab Logic ---
         document.querySelector('#mainTabs a[href="#settings"]').addEventListener('shown.bs.tab', function (e) { 
             fetchCompanies();
@@ -373,8 +398,17 @@
             // Customer Settings
             const custDirection = document.getElementById('custSyncDirection').value;
             const custAutoSync = document.getElementById('custAutoSync').checked;
-            const custSyncTags = document.getElementById('custSyncTags').checked;
+            const custSyncTagsSwitch = document.getElementById('custSyncTagsSwitch').checked;
             
+            let whitelistTags = "";
+            let blacklistTags = "";
+
+            if (custSyncTagsSwitch) {
+                whitelistTags = document.getElementById('custWhitelistTags').value;
+                blacklistTags = document.getElementById('custBlacklistTags').value;
+            }
+
+
             if (!companyId) { alert("Please select a Company first."); return; }
 
             fetch('/api/settings/save', {
@@ -384,7 +418,10 @@
                     company_id: companyId, 
                     field, locations, sync_zero: syncZero, combine_committed: combineCommitted,
                     cust_direction: custDirection, 
-                    cust_auto_sync: custAutoSync, cust_sync_tags: custSyncTags
+                    cust_auto_sync: custAutoSync, 
+                    cust_sync_tags: custSyncTagsSwitch, // Use the switch state
+                    cust_whitelist_tags: whitelistTags,
+                    cust_blacklist_tags: blacklistTags
                 })
             })
             .then(r => r.json())
