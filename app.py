@@ -431,6 +431,7 @@ def archive_shopify_duplicates():
         log_event('Duplicate Scan', 'Info', "Starting Duplicate SKU Scan...")
         
         sku_map = {}
+        # FIX: Implement robust pagination here if required for stores > 250 variants
         variants = shopify.Variant.find(limit=250) 
         
         for v in variants:
