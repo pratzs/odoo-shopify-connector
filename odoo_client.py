@@ -176,7 +176,6 @@ class OdooClient:
                 ('company_id', '=', False)
             ]
         
-        # NOTE: Added 'category_id' to fields to support tag filtering/syncing
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
@@ -199,8 +198,12 @@ class OdooClient:
             if data: total_qty += data[0].get(field_name, 0)
         return total_qty
 
-    def create_sale_order(self, order_vals):
-        return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'create', [order_vals])
+    # UPDATED: Accepts optional context
+    def create_sale_order(self, order_vals, context=None):
+        kwargs = {}
+        if context:
+            kwargs['context'] = context
+        return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'create', [order_vals], kwargs)
 
     def update_sale_order(self, order_id, order_vals):
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'write', [[order_id], order_vals])
