@@ -23,7 +23,7 @@
         <table class="table table-striped table-hover mb-0 table-sm">
             <thead>
                 <tr>
-                    <th style="width: 25%">Time (NZT)</th>
+                    <th style="width: 25%">Time</th>
                     <th style="width: 15%">Status</th>
                     <th>Message</th>
                 </tr>
@@ -34,12 +34,12 @@
                     <tr>
                         <td>
                             <!-- Data attribute stores UTC for JS conversion -->
-                            <span class="nzt-timestamp" data-utc="{{ log.timestamp.strftime('%Y-%m-%dT%H:%M:%SZ') }}">
+                            <span class="local-timestamp" data-utc="{{ log.timestamp.strftime('%Y-%m-%dT%H:%M:%SZ') }}">
                                 {{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }} UTC
                             </span>
                         </td>
                         <td>
-                            <span class="badge {{ 'bg-success' if log.status == 'Success' else ('bg-warning' if log.status == 'Skipped' or log.status == 'Warning' else 'bg-danger') }}">
+                            <span class="badge {{ 'bg-success' if 'Success' in log.status else ('bg-danger' if 'Error' in log.status else 'bg-info') }}">
                                 {{ log.status }}
                             </span>
                         </td>
@@ -80,12 +80,26 @@
                         <h5 class="mb-0"><i class="bi bi-sliders"></i> Manual Actions</h5>
                     </div>
                     <div class="mt-3 d-flex gap-2 flex-wrap">
+                        <!-- Order Actions -->
                         <button onclick="openOrderImportModal()" class="btn btn-primary">
                             <i class="bi bi-cloud-download"></i> Fetch Recent Shopify Orders
                         </button>
+                        
+                        <!-- Inventory Actions -->
                         <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary">
                             <i class="bi bi-box-seam"></i> Force Inventory Sync
                         </button>
+                        
+                        <!-- Product Actions (NEW) -->
+                        <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark">
+                            <i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)
+                        </button>
+                        
+                        <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger">
+                            <i class="bi bi-trash"></i> Archive Duplicate SKUs
+                        </button>
+
+                        <!-- System Actions -->
                         <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info">
                             <i class="bi bi-lightning"></i> Test Connection
                         </button>
@@ -99,6 +113,7 @@
             <div class="card-header bg-white">
                 <ul class="nav nav-tabs card-header-tabs" id="mainTabs" role="tablist">
                     <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#orders">Orders Log</a></li>
+                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#products">Products Log</a></li>
                     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#inventory">Inventory Log</a></li>
                     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#customers">Customers Log</a></li>
                     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#system">System/Errors</a></li>
@@ -107,18 +122,32 @@
             </div>
             <div class="card-body p-0">
                 <div class="tab-content" id="mainTabsContent">
+                    
+                    <!-- Orders Tab -->
                     <div class="tab-pane fade show active" id="orders">
                         {% if logs_orders is defined %}{{ render_log_table(logs_orders) }}
                         {% else %}<div class="p-3 text-danger">Error: Logs not loaded from backend.</div>{% endif %}
                     </div>
+
+                    <!-- Products Tab (NEW) -->
+                    <div class="tab-pane fade" id="products">
+                        {% if logs_products is defined %}{{ render_log_table(logs_products) }}
+                        {% else %}<div class="p-3 text-muted text-center">No product logs available.</div>{% endif %}
+                    </div>
+
+                    <!-- Inventory Tab -->
                     <div class="tab-pane fade" id="inventory">
                         {% if logs_inventory is defined %}{{ render_log_table(logs_inventory) }}
                         {% else %}<div class="p-3 text-danger">Error: Logs not loaded.</div>{% endif %}
                     </div>
+
+                    <!-- Customers Tab -->
                     <div class="tab-pane fade" id="customers">
                         {% if logs_customers is defined %}{{ render_log_table(logs_customers) }}
                         {% else %}<div class="p-3 text-danger">Error: Logs not loaded.</div>{% endif %}
                     </div>
+
+                    <!-- System Tab -->
                     <div class="tab-pane fade" id="system">
                         {% if logs_system is defined %}{{ render_log_table(logs_system) }}
                         {% else %}<div class="p-3 text-danger">Error: Logs not loaded.</div>{% endif %}
@@ -139,37 +168,34 @@
                         <!-- Quantity & Sync Rules -->
                         <div class="card mb-4 bg-light border-0">
                             <div class="card-body">
+                                <h6 class="card-title fw-bold mb-3">Inventory Rules</h6>
                                 <div class="row g-3">
                                     <div class="col-md-6">
-                                        <label class="form-label fw-bold">2. Quantity Type</label>
+                                        <label class="form-label">Quantity Type</label>
                                         <select class="form-select" id="invType">
                                             <option value="qty_available" {% if current_settings.field == 'qty_available' %}selected{% endif %}>Quantity On Hand (Physical)</option>
                                             <option value="virtual_available" {% if current_settings.field == 'virtual_available' %}selected{% endif %}>Quantity Available (Forecasted)</option>
                                         </select>
                                     </div>
                                     <div class="col-md-6">
-                                        <label class="form-label fw-bold">3. Auto-Sync Frequency</label>
+                                        <label class="form-label">Auto-Sync Frequency</label>
                                         <select class="form-select" id="syncFreq" disabled>
                                             <option selected>Every 30 Minutes</option>
                                         </select>
-                                        <div class="form-text text-muted">Controlled by external Cron job.</div>
                                     </div>
                                 </div>
                                 <div class="mt-3">
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
-                                        <label class="form-check-label" for="checkZeroStock">
-                                            <strong>Do not sync zero stock</strong><br>
-                                            <span class="text-muted small">When checked, products with 0 stock will be skipped. Uncheck to sync 0 stock updates.</span>
-                                        </label>
+                                        <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
                                     </div>
                                     <div class="form-check mt-2">
                                         <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
-                                        <label class="form-check-label" for="checkCommitted">
-                                            <strong>Combine Odoo available + Shopify committed</strong><br>
-                                            <span class="text-muted small">Adds Shopify's committed stock to Odoo's available quantity before syncing.</span>
-                                        </label>
+                                        <label class="form-check-label" for="checkCommitted">Combine Odoo available + Shopify committed</label>
                                     </div>
+                                </div>
+                                <div class="mt-3" id="locationList">
+                                    <!-- Locations loaded via JS -->
                                 </div>
                             </div>
                         </div>
@@ -186,56 +212,27 @@
                                             <option value="odoo_to_shopify" {% if current_settings.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
                                             <option value="shopify_to_odoo" {% if current_settings.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
                                         </select>
-                                        <div class="form-text">Controls how customer data flows. Bidirectional treats Odoo as the source of truth.</div>
-                                    </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-bold">Customer Sync Option</label>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="custSyncOption" id="custCreateUpdate" value="create_update" checked>
-                                            <label class="form-check-label" for="custCreateUpdate">Create new and update existing customers</label>
-                                        </div>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="custSyncOption" id="custUpdateOnly" value="update_only">
-                                            <label class="form-check-label" for="custUpdateOnly">Only update existing customers</label>
-                                        </div>
                                     </div>
 
                                     <div class="form-check form-switch mb-2">
                                         <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
                                         <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync</label>
-                                        <div class="form-text">Automatically sync customers from Odoo to Shopify once daily.</div>
                                     </div>
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" id="custSyncTags" {% if current_settings.cust_sync_tags %}checked{% endif %}>
                                         <label class="form-check-label fw-bold" for="custSyncTags">Sync Customer Tags</label>
-                                        <div class="form-text">Select specific customer tags to sync. Leave disabled to sync all.</div>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Location Mapping -->
-                        <div class="mb-4">
-                            <label class="form-label fw-bold">5. Location Mapping</label>
-                            <div class="mapping-box d-flex align-items-center justify-content-between">
-                                <div class="border rounded p-2 bg-white flex-grow-1 text-center">
-                                    <strong>Shopify:</strong> VJ Trading Warehouse
-                                </div>
-                                <div class="mx-3 text-muted"><i class="bi bi-arrow-left"></i> Syncs From <i class="bi bi-arrow-left"></i></div>
-                                <div class="border rounded p-2 bg-white flex-grow-1">
-                                    <div class="fw-bold mb-2">Odoo Inventory Locations:</div>
-                                    <div id="locationList" style="max-height: 200px; overflow-y: auto;">
-                                        <div class="text-center text-muted"><div class="spinner-border spinner-border-sm"></div> Select a Company first...</div>
-                                    </div>
-                                </div>
-                            </div>
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                            <button onclick="saveSettings()" class="btn btn-success btn-lg px-5">
+                                <i class="bi bi-save"></i> Save Configuration
+                            </button>
                         </div>
 
-                        <button onclick="saveSettings()" class="btn btn-success">
-                            <i class="bi bi-save"></i> Save Configuration
-                        </button>
-                    </div>
+                    </div> <!-- End Settings Tab -->
                 </div>
             </div>
         </div>
@@ -256,7 +253,7 @@
                                 <tr>
                                     <th><input type="checkbox" id="selectAllOrders"></th>
                                     <th>Order</th>
-                                    <th>Date (NZT)</th>
+                                    <th>Date</th>
                                     <th>Total</th>
                                     <th>Odoo Status</th>
                                 </tr>
@@ -291,12 +288,15 @@
             new bootstrap.Toast(document.getElementById('liveToast')).show();
         }
 
-        // --- TIMEZONE CONVERSION (NZT) ---
-        function formatNZT(utcString) {
+        // --- TIMEZONE CONVERSION (Browser Local) ---
+        function formatLocalTime(utcString) {
             if (!utcString) return '';
             try {
-                return new Date(utcString).toLocaleString('en-NZ', {
-                    timeZone: 'Pacific/Auckland',
+                // Get user's timezone from browser
+                const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                
+                return new Date(utcString).toLocaleString(undefined, {
+                    timeZone: userTimezone,
                     year: 'numeric', month: '2-digit', day: '2-digit',
                     hour: '2-digit', minute: '2-digit', second: '2-digit',
                     hour12: true
@@ -305,12 +305,10 @@
         }
 
         document.addEventListener("DOMContentLoaded", function() {
-            document.querySelectorAll('.nzt-timestamp').forEach(el => {
+            document.querySelectorAll('.local-timestamp').forEach(el => {
                 const utc = el.getAttribute('data-utc');
-                if(utc) el.innerText = formatNZT(utc);
+                if(utc) el.innerText = formatLocalTime(utc);
             });
-            // Apply saved settings to inputs
-            // (Note: Other settings applied inline via templating, JS handles location checks)
         });
 
         // --- Settings Tab Logic ---
@@ -327,12 +325,12 @@
                     if(data.error) return;
                     
                     data.forEach(c => {
-                        const isSel = (SAVED_SETTINGS.company_id == c.id) ? 'selected' : '';
+                        const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
                         sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
                     });
                     
                     // Automatically load locations if company was already saved
-                    if (SAVED_SETTINGS.company_id) fetchLocations(SAVED_SETTINGS.company_id);
+                    if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
                 });
         }
 
@@ -354,7 +352,6 @@
                     const savedLocs = SAVED_SETTINGS.locations || [];
                     const items = data.map(loc => {
                         const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
-                        // Simple cleanup of location names
                         const displayName = loc.complete_name.replace('Physical Locations/', '').replace(loc.complete_name.split('/')[0] + '/', '');
                         return `
                             <div class="form-check">
@@ -368,14 +365,13 @@
 
         function saveSettings() {
             const companyId = document.getElementById('companySelect').value;
-            const field = document.querySelector('input[name="invType"]:checked').value;
+            const field = document.querySelector('input[name="invType"]:checked') ? document.querySelector('input[name="invType"]:checked').value : 'qty_available';
             const syncZero = document.getElementById('checkZeroStock').checked;
             const combineCommitted = document.getElementById('checkCommitted').checked;
             const locations = Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value));
             
             // Customer Settings
             const custDirection = document.getElementById('custSyncDirection').value;
-            const custOption = document.querySelector('input[name="custSyncOption"]:checked').value;
             const custAutoSync = document.getElementById('custAutoSync').checked;
             const custSyncTags = document.getElementById('custSyncTags').checked;
             
@@ -387,7 +383,7 @@
                 body: JSON.stringify({ 
                     company_id: companyId, 
                     field, locations, sync_zero: syncZero, combine_committed: combineCommitted,
-                    cust_direction: custDirection, cust_option: custOption, 
+                    cust_direction: custDirection, 
                     cust_auto_sync: custAutoSync, cust_sync_tags: custSyncTags
                 })
             })
@@ -406,7 +402,7 @@
                 if (data.orders && data.orders.length > 0) {
                     data.orders.forEach(order => {
                         let badgeClass = order.odoo_status.includes('Not Synced') ? 'bg-danger' : 'bg-success';
-                        tbody.innerHTML += `<tr><td><input type="checkbox" class="order-select" value="${order.id}"></td><td>${order.name}</td><td>${formatNZT(order.date)}</td><td>${order.total}</td><td><span class="badge ${badgeClass}">${order.odoo_status}</span></td></tr>`;
+                        tbody.innerHTML += `<tr><td><input type="checkbox" class="order-select" value="${order.id}"></td><td>${order.name}</td><td>${formatLocalTime(order.date)}</td><td>${order.total}</td><td><span class="badge ${badgeClass}">${order.odoo_status}</span></td></tr>`;
                     });
                 } else { tbody.innerHTML = '<tr><td colspan="5" class="text-center">No orders found.</td></tr>'; }
             });
