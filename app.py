@@ -481,7 +481,6 @@ def dashboard():
         "cust_direction": get_config('cust_direction', 'bidirectional'),
         "cust_auto_sync": get_config('cust_auto_sync', True),
         "cust_sync_tags": get_config('cust_sync_tags', False),
-        # NEW CONFIGS
         "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
         "cust_blacklist_tags": get_config('cust_blacklist_tags', '')
     }
