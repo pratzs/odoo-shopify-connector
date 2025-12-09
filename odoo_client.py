@@ -15,7 +15,7 @@ class OdooClient:
         self.models = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     def search_partner_by_email(self, email):
-        # UPDATED: Added ['active', '=', True] to ignore archived customers
+        # Strictly Active
         ids = self.models.execute_kw(self.db, self.uid, self.password,
             'res.partner', 'search', [[['email', '=', email], ['active', '=', True]]])
         if ids:
@@ -25,22 +25,17 @@ class OdooClient:
         return None
 
     def get_partner_salesperson(self, partner_id):
-        """Fetches the Salesperson (user_id) for a specific partner/company"""
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'res.partner', 'read', [[partner_id]], {'fields': ['user_id']})
         if data and data[0].get('user_id'):
-            # user_id is returned as a tuple (id, name), we want the ID at index 0
             return data[0]['user_id'][0] 
         return None
 
     def create_partner(self, vals):
-        """Creates a new contact/company in Odoo"""
         self._resolve_country(vals)
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
-        """Checks if a child address exists. If not, creates it."""
-        # UPDATED: Added ['active', '=', True] to ignore archived addresses
         domain = [
             ['parent_id', '=', parent_id],
             ['type', '=', type],
@@ -65,23 +60,20 @@ class OdooClient:
         }
         
         self._resolve_country(vals)
-
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def _resolve_country(self, vals):
-        """Helper to find Odoo Country ID from ISO code"""
         code = vals.get('country_code')
         if code:
             ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', code]]])
             if not ids:
                  ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['name', 'ilike', code]]])
-            
             if ids:
                 vals['country_id'] = ids[0]
             del vals['country_code']
 
     def search_product_by_sku(self, sku, company_id=None):
-        # UPDATED: Added ['active', '=', True]
+        """Strictly searches for ACTIVE products only."""
         domain = [['default_code', '=', sku], ['active', '=', True]]
         if company_id:
             domain.append('|')
@@ -91,8 +83,19 @@ class OdooClient:
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
+    def check_product_exists_by_sku(self, sku, company_id=None):
+        """Checks if a product exists (Active OR Archived) to prevent creation errors."""
+        # Note: We use '|', ('active', '=', True), ('active', '=', False) to find both
+        domain = [['default_code', '=', sku], '|', ['active', '=', True], ['active', '=', False]]
+        if company_id:
+            domain.append('|')
+            domain.append(['company_id', '=', int(company_id)])
+            domain.append(['company_id', '=', False])
+            
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
+        return ids[0] if ids else None
+
     def search_product_by_name(self, name, company_id=None):
-        # UPDATED: Added ['active', '=', True]
         domain = [['name', 'ilike', name], ['active', '=', True]]
         if company_id:
             domain.append('|')
@@ -111,40 +114,40 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def create_product(self, vals):
-        """Creates a standard Storable Product in Odoo (Used when Shopify sends new SKU)"""
         if 'type' not in vals:
-            vals['type'] = 'product'  # Default to storable
+            vals['type'] = 'product'
         if 'invoice_policy' not in vals:
             vals['invoice_policy'] = 'delivery'
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def get_all_products(self, company_id=None):
-        """Fetches ALL active products for Master Sync"""
-        domain = [('active', '=', True), ('type', '=', 'product'), ('default_code', '!=', False)]
+        """Fetches ALL products (Active & Archived) for Master Sync"""
+        # Note: We fetch both active=True and active=False to sync archival status
+        domain = [('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
-            # (active AND type AND sku) AND (company=ID OR company=False)
+            # Reconstruct for Company logic
+            # (Type=Product AND SKU!=False AND (Active=True OR Active=False) AND (Company=ID OR Company=False))
             domain = [
                 '&', '&', '&',
-                ('active', '=', True),
                 ('type', '=', 'product'),
                 ('default_code', '!=', False),
-                '|',
-                ('company_id', '=', int(company_id)),
-                ('company_id', '=', False)
+                '|', ('active', '=', True), ('active', '=', False),
+                '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # We need specific fields for syncing to Shopify
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale']
+        # We include 'active' field to know status
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
-        domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), ('active', '=', True)]
+        """Fetches changed products (Active & Archived) since time limit"""
+        domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), '|', ('active', '=', True), ('active', '=', False)]
         if company_id:
             domain = [
                 '&', '&', '&',
                 ('write_date', '>', time_limit_str), 
                 ('type', '=', 'product'),
-                ('active', '=', True),
+                '|', ('active', '=', True), ('active', '=', False),
                 '|', 
                 ('company_id', '=', int(company_id)), 
                 ('company_id', '=', False)
