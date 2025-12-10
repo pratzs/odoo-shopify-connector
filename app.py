@@ -138,7 +138,6 @@ def process_order_data(data):
             if user_info: company_id = user_info[0]['company_id'][0]
         except: pass
 
-    # Check for existing order
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -154,11 +153,12 @@ def process_order_data(data):
         name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
         
         vals = {
-            'name': name, 'email': email, 'phone': cust_data.get('phone'),
+            'name': name, 'email': email, 'phone': cust_data.get('phone') or def_address.get('phone'),
             'company_type': 'company', 'street': def_address.get('address1'),
             'city': def_address.get('city'), 'zip': def_address.get('zip'), 'country_code': def_address.get('country_code')
         }
         if company_id: vals['company_id'] = int(company_id)
+
         try:
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': name, 'parent_id': False}
@@ -171,6 +171,7 @@ def process_order_data(data):
                 db.session.commit()
 
         except Exception as e:
+            log_event('Customer', 'Error', f"Create Failed: {e}")
             return False, f"Customer Error: {e}"
     
     partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
@@ -219,18 +220,17 @@ def process_order_data(data):
         sku = item.get('sku')
         if not sku: continue
 
-        # STRICT SEARCH: Only find Active products
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if not product_id:
-            # Check if it exists as ARCHIVED
+            # Check ARCHIVED
             archived_id = odoo.check_product_exists_by_sku(sku, company_id)
             
             if archived_id:
                 log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived in Odoo.")
                 continue 
             
-            # If completely missing (Active OR Archived), Create it
+            # Create Missing Product
             log_event('Product', 'Info', f"SKU {sku} missing in Odoo. Creating...")
             try:
                 new_p_vals = {
@@ -246,12 +246,10 @@ def process_order_data(data):
                 log_event('Product', 'Error', f"Failed to create SKU {sku}: {e}")
 
         if product_id:
-            # --- YOUR EXACT STABLE LOGIC ---
+            # --- STABLE DISCOUNT LOGIC ---
             price = float(item.get('price', 0))
             qty = int(item.get('quantity', 1))
             disc = float(item.get('total_discount', 0))
-            
-            # Original percentage calculation
             pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
             
             lines.append((0, 0, {
@@ -262,7 +260,24 @@ def process_order_data(data):
                 'discount': pct
             }))
         else:
-            log_event('Order', 'Warning', f"Skipped line {sku}: Could not create/find active product.")
+            log_event('Product', 'Warning', f"SKU {item.get('sku')} not found")
+
+    for ship in data.get('shipping_lines', []):
+        cost = float(ship.get('price', 0))
+        title = ship.get('title', 'Shipping')
+        ship_pid = odoo.search_product_by_name(title, company_id)
+        
+        if not ship_pid:
+            ship_pid = odoo.search_product_by_name("Shipping", company_id)
+            
+        if not ship_pid:
+            try:
+                ship_pid = odoo.create_service_product(title, company_id)
+                ship_pid = extract_id(ship_pid)
+            except: pass
+            
+        if cost >= 0 and ship_pid:
+            lines.append((0, 0, {'product_id': ship_pid, 'product_uom_qty': 1, 'price_unit': cost, 'name': title, 'is_delivery': True}))
 
     if not lines: return False, "No valid lines"
     
@@ -281,7 +296,7 @@ def process_order_data(data):
     }
     if company_id: vals['company_id'] = int(company_id)
     
-    # FIX DUPLICATE ORDERS: Check existence
+    # FIX DUPLICATE ORDERS
     try:
         existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
             'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -329,8 +344,6 @@ def sync_products_master():
             target_status = 'active' if p.get('active', True) else 'archived'
             
             # --- ARCHIVED LOGIC FIX ---
-            # If Odoo product is archived, ONLY archive it in Shopify and STOP.
-            # Do NOT update images, metafields, inventory, or description.
             if target_status == 'archived':
                 shopify_id = find_shopify_product_by_sku(sku)
                 if shopify_id:
@@ -341,7 +354,7 @@ def sync_products_master():
                             sp.save()
                             log_event('Product Sync', 'Info', f"Archived {sku} in Shopify.")
                     except: pass
-                continue # Skip all other updates for this product
+                continue 
 
             # --- ACTIVE PRODUCT LOGIC ---
             shopify_id = find_shopify_product_by_sku(sku)
@@ -351,33 +364,86 @@ def sync_products_master():
                 else:
                     sp = shopify.Product()
                 
-                sp.title = p['name']
-                sp.body_html = p.get('description_sale') or ''
+                # --- CHANGE DETECTION & MAPPING ---
+                product_changed = False
+                
+                # Title
+                if sp.title != p['name']:
+                    sp.title = p['name']
+                    product_changed = True
+
+                # Description
+                odoo_desc = p.get('description_sale') or ''
+                if (sp.body_html or '') != odoo_desc:
+                    sp.body_html = odoo_desc
+                    product_changed = True
                 
                 # Product Type Mapping
                 categ_name = odoo.get_public_category_name(p.get('public_categ_ids'))
-                sp.product_type = categ_name if categ_name else 'Storable Product'
+                target_type = categ_name if categ_name else 'Storable Product'
+                if sp.product_type != target_type:
+                    sp.product_type = target_type
+                    product_changed = True
                 
                 # Vendor Mapping
                 vendor_name = odoo.get_vendor_name(p.get('product_tmpl_id')[0])
-                sp.vendor = vendor_name.split()[0] if vendor_name else 'Odoo Master'
+                target_vendor = vendor_name.split()[0] if vendor_name else 'Odoo Master'
+                if sp.vendor != target_vendor:
+                    sp.vendor = target_vendor
+                    product_changed = True
 
-                sp.status = target_status
-                sp.save()
+                # Status
+                if sp.status != target_status:
+                    sp.status = target_status
+                    product_changed = True
                 
+                # Only save main product if changes detected or it's new
+                if product_changed or not shopify_id:
+                    sp.save()
+                
+                # Variant Logic
                 if sp.variants:
                     variant = sp.variants[0]
                 else:
                     variant = shopify.Variant()
-                    
-                variant.sku = sku
-                variant.price = str(p['list_price'])
-                variant.barcode = p.get('barcode', 0) or ''
-                variant.weight = p.get('weight', 0)
-                variant.inventory_management = 'shopify'
                 
-                variant.product_id = sp.id
-                variant.save()
+                variant_changed = False
+                
+                if variant.sku != sku:
+                    variant.sku = sku
+                    variant_changed = True
+                
+                # Price Check
+                target_price = str(p['list_price'])
+                if variant.price != target_price:
+                    variant.price = target_price
+                    variant_changed = True
+
+                # Barcode Check
+                target_barcode = p.get('barcode', 0) or ''
+                if str(variant.barcode or '') != str(target_barcode):
+                    variant.barcode = str(target_barcode)
+                    variant_changed = True
+                
+                # Weight Check (Float comparison)
+                try:
+                    if float(variant.weight or 0) != float(p.get('weight', 0)):
+                        variant.weight = p.get('weight', 0)
+                        variant_changed = True
+                except:
+                    variant.weight = p.get('weight', 0)
+                    variant_changed = True
+
+                if variant.inventory_management != 'shopify':
+                    variant.inventory_management = 'shopify'
+                    variant_changed = True
+                
+                if str(variant.product_id) != str(sp.id):
+                    variant.product_id = sp.id
+                    variant_changed = True
+
+                if variant_changed or not shopify_id:
+                    variant.save()
                 
                 # Inventory Sync
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
