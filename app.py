@@ -42,9 +42,13 @@ try:
 except Exception as e:
     print(f"Odoo Startup Error: {e}")
 
+# --- DB INIT (UPDATED: Removed silent failure) ---
 with app.app_context():
-    try: db.create_all()
-    except: pass
+    try: 
+        db.create_all()
+        print("Database tables created/verified.")
+    except Exception as e: 
+        print(f"CRITICAL DB INIT ERROR: {e}")
 
 # --- HELPERS ---
 def get_config(key, default=None):
@@ -74,10 +78,18 @@ def verify_shopify(data, hmac_header):
 
 def log_event(entity, status, message):
     try:
-        log = SyncLog(entity=entity, status=status, message=message)
+        # UPDATED: Explicit timestamp and rollback handling
+        log = SyncLog(
+            entity=entity, 
+            status=status, 
+            message=message, 
+            timestamp=datetime.utcnow()
+        )
         db.session.add(log)
         db.session.commit()
-    except Exception as e: print(f"DB LOG ERROR: {e}")
+    except Exception as e: 
+        print(f"DB LOG ERROR: {e}")
+        db.session.rollback()
 
 def extract_id(res):
     if isinstance(res, list) and len(res) > 0:
@@ -589,6 +601,7 @@ def api_live_logs():
     try:
         # Fetch latest 100 logs
         logs = SyncLog.query.order_by(SyncLog.timestamp.desc()).limit(100).all()
+        print(f"DEBUG: Found {len(logs)} logs in DB.") # DEBUG PRINT
         
         data = []
         for log in logs:
@@ -608,6 +621,7 @@ def api_live_logs():
             })
         return jsonify(data)
     except Exception as e:
+        print(f"DEBUG API ERROR: {e}")
         return jsonify([])
 
 @app.route('/sync/products/master', methods=['POST'])
