@@ -321,8 +321,8 @@ def process_order_data(data):
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
                 
-                # Create if missing
-                log_event('Product', 'Info', f"SKU {sku} missing. Creating...")
+                # Create if missing (ONLY ALLOWED HERE)
+                log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
                 try:
                     new_p_vals = {
                         'name': item['name'],
