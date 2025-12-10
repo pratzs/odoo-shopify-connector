@@ -281,6 +281,8 @@ def process_order_data(data):
     
     try:
         if existing_ids:
+            # --- CHANGE: Log that we saw the order but updated it (or skipped) ---
+            log_event('Order', 'Info', f"Order {client_ref} already exists. Marked as Updated.")
             return True, "Updated"
         else:
             # FIXED: Pass context to FORCE Odoo to use our price (4.08) not Price List (4.49)
@@ -416,12 +418,6 @@ def sync_products_master():
                 
                 # Inventory Sync
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
-                    # Optimized: Only update if different
-                    # We reuse variant object if available, otherwise fetch
-                    # But finding exact quantity via REST is messy.
-                    # We will update inventory in the optimized sync_inventory loop
-                    # OR we can do it here unconditionally to be safe for master sync.
-                    # Given Master Sync runs once a day, forcing update is acceptable here.
                     qty = int(p.get('qty_available', 0))
                     try:
                         shopify.InventoryLevel.set(
@@ -616,16 +612,22 @@ def api_live_logs():
 
 @app.route('/sync/products/master', methods=['POST'])
 def trigger_master_sync():
+    # --- LOG ADDED ---
+    log_event('System', 'Info', 'Manual Trigger: Starting Master Product Sync...')
     threading.Thread(target=sync_products_master).start()
     return jsonify({"message": "Master Product Sync Started (Odoo -> Shopify)"})
 
 @app.route('/sync/products/archive_duplicates', methods=['POST'])
 def trigger_duplicate_scan():
+    # --- LOG ADDED ---
+    log_event('System', 'Info', 'Manual Trigger: Starting Duplicate Scan...')
     threading.Thread(target=archive_shopify_duplicates).start()
     return jsonify({"message": "Duplicate Scan Started"})
 
 @app.route('/sync/customers/master', methods=['POST'])
 def trigger_customer_master_sync():
+    # --- LOG ADDED ---
+    log_event('System', 'Info', 'Manual Trigger: Starting Customer Master Sync...')
     threading.Thread(target=sync_customers_master).start()
     return jsonify({"message": "Master Customer Sync Started (Odoo -> Shopify)"})
 
@@ -666,6 +668,9 @@ def sync_inventory():
     """Optimized Inventory Sync: Only updates if Shopify differs from Odoo"""
     if not odoo or not setup_shopify_session(): return jsonify({"error": "Offline"}), 500
     
+    # --- LOG ADDED ---
+    log_event('System', 'Info', 'Manual Trigger: Starting Inventory Sync...')
+
     with app.app_context():
         target_locations = get_config('inventory_locations', [])
         target_field = get_config('inventory_field', 'qty_available')
@@ -681,7 +686,9 @@ def sync_inventory():
         last_run = datetime.utcnow() - timedelta(minutes=35)
         try: 
             product_ids = odoo.get_changed_products(str(last_run), company_id)
-        except: return jsonify({"error": "Read Failed"}), 500
+        except: 
+            log_event('Inventory', 'Error', "Failed to read changed products from Odoo")
+            return jsonify({"error": "Read Failed"}), 500
         
         count = 0
         updates = 0
@@ -715,7 +722,9 @@ def sync_inventory():
                     print(f"Inv Set Error {sku}: {e}")
             
             count += 1
-            
+        
+        # --- LOG ADDED: Summary ---
+        log_event('Inventory', 'Success', f"Inventory Sync Complete. Checked {count} items, Updated {updates}.")
         return jsonify({"synced": count, "updates": updates})
 
 @app.route('/sync/orders/manual', methods=['GET'])
@@ -741,6 +750,10 @@ def import_selected_orders():
     ids = request.json.get('order_ids', [])
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     synced = 0
+    
+    # --- LOG ADDED ---
+    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
+
     for oid in ids:
         res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
         if res.status_code == 200:
@@ -775,7 +788,8 @@ def refund_webhook():
 
 @app.route('/test/simulate_order', methods=['POST'])
 def test_sim_dummy():
-     return jsonify({"message": "Connection OK"})
+     log_event('System', 'Success', "Test Connection Triggered by User")
+     return jsonify({"message": "Connection OK. Log Entry Created."})
 
 @app.route('/sync/order_status', methods=['GET'])
 def sync_order_status():
