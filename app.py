@@ -354,9 +354,9 @@ def sync_products_master():
                     sp.product_type = target_type
                     product_changed = True
                 
-                # Vendor Mapping
-                vendor_name = odoo.get_vendor_name(p.get('product_tmpl_id')[0])
-                target_vendor = vendor_name.split()[0] if vendor_name else 'Odoo Master'
+                # Vendor Mapping (UPDATED: Use First Word of Product Title)
+                product_title = p.get('name', '')
+                target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
                 if sp.vendor != target_vendor:
                     sp.vendor = target_vendor
                     product_changed = True
@@ -476,6 +476,7 @@ def sync_customers_master():
         
         if not odoo or not setup_shopify_session(): return
         odoo_customers = odoo.get_changed_customers(last_sync_dt.strftime('%Y-%m-%d %H:%M:%S'), company_id)
+        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers changed.")
         
         synced_count = 0
         current_time_str = datetime.utcnow().isoformat()
@@ -622,6 +623,7 @@ def api_save_settings():
     set_config('odoo_company_id', data.get('company_id'))
     set_config('cust_direction', data.get('cust_direction'))
     set_config('cust_auto_sync', data.get('cust_auto_sync'))
+    # UPDATED: Save the two new tag configuration keys
     set_config('cust_sync_tags', data.get('cust_sync_tags'))
     set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
     set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
@@ -748,8 +750,11 @@ def sync_order_status():
     return jsonify({"status": "Checked"})
 
 def run_schedule():
+    # Master Product Sync daily
     schedule.every(1).days.do(sync_products_master)
+    # Master Customer Sync daily
     schedule.every(1).days.do(sync_customers_master)
+    # Monthly Duplicate Scan
     schedule.every(30).days.do(archive_shopify_duplicates)
     while True:
         schedule.run_pending()
