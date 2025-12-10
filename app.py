@@ -587,6 +587,33 @@ def dashboard():
 def live_logs():
     return render_template('live_logs.html')
 
+@app.route('/api/logs/live', methods=['GET'])
+def api_live_logs():
+    """Provides logs for the live viewer directly from DB"""
+    try:
+        # Fetch latest 100 logs
+        logs = SyncLog.query.order_by(SyncLog.timestamp.desc()).limit(100).all()
+        
+        data = []
+        for log in logs:
+            # Map DB status to UI types
+            msg_type = 'info'
+            status_lower = (log.status or '').lower()
+            if 'error' in status_lower or 'fail' in status_lower: msg_type = 'error'
+            elif 'success' in status_lower: msg_type = 'success'
+            elif 'warning' in status_lower or 'skip' in status_lower: msg_type = 'warning'
+            
+            data.append({
+                'id': log.id,
+                'timestamp': log.timestamp.isoformat(),
+                'message': f"[{log.entity}] {log.message}", 
+                'type': msg_type,
+                'details': log.status
+            })
+        return jsonify(data)
+    except Exception as e:
+        return jsonify([])
+
 @app.route('/sync/products/master', methods=['POST'])
 def trigger_master_sync():
     threading.Thread(target=sync_products_master).start()
