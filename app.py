@@ -174,9 +174,6 @@ def get_shopify_variant_inv_by_sku(sku):
 def process_product_data(data):
     """
     Handles Shopify Product Webhooks (Update Only).
-    1. IGNORES new products (Does NOT create in Odoo).
-    2. Syncs 'Product Type' -> Odoo 'Ecommerce Category' for existing active products.
-    3. Does NOT overwrite Price/Stock on updates (Odoo is Master).
     """
     product_type = data.get('product_type', '')
     
@@ -226,8 +223,6 @@ def process_product_data(data):
                     print(f"Webhook Update Error: {e}")
         else:
             # --- SKIP CREATION ---
-            # Product missing or Archived. We strictly ignore creation from direct product webhooks.
-            # Creation is only allowed via Sales Order (see process_order_data).
             pass
 
     return processed_count
@@ -321,8 +316,8 @@ def process_order_data(data):
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
                 
-                # Create if missing (ONLY ALLOWED HERE)
-                log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
+                # Create if missing
+                log_event('Product', 'Info', f"SKU {sku} missing. Creating...")
                 try:
                     new_p_vals = {
                         'name': item['name'],
@@ -731,6 +726,39 @@ def sync_categories_only():
         
         log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
+def repair_corrupted_pos_categories():
+    """
+    EMERGENCY FIX TOOL:
+    Attempts to write valid names to specific POS Category IDs that are causing crashes.
+    IDs identified from logs: 29, 34, 35, 36, 44, 48, 50, 54, 59, 9900
+    """
+    with app.app_context():
+        if not odoo: 
+            log_event('System', 'Error', "Repair Failed: Odoo not connected")
+            return
+
+        bad_ids = [29, 34, 35, 36, 44, 48, 50, 54, 59, 9900]
+        fixed_count = 0
+        failed_count = 0
+
+        log_event('System', 'Info', f"Starting Emergency Repair for {len(bad_ids)} POS Categories...")
+
+        for cat_id in bad_ids:
+            try:
+                # Attempt to write a valid name to the category
+                # We simply name it "Recovered [ID]" to satisfy the unique string requirement
+                new_name = f"Recovered {cat_id}"
+                odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'pos.category', 'write', [[cat_id], {'name': new_name}])
+                fixed_count += 1
+                print(f"Fixed POS Category {cat_id}")
+            except Exception as e:
+                print(f"Failed to fix {cat_id}: {e}")
+                failed_count += 1
+        
+        status_msg = f"Repair Complete. Fixed: {fixed_count}, Failed/Access Denied: {failed_count}"
+        log_event('System', 'Success' if failed_count == 0 else 'Warning', status_msg)
+
 def sync_customers_master():
     """Odoo -> Shopify Customer Sync"""
     with app.app_context():
@@ -909,6 +937,12 @@ def api_live_logs():
             data.append({'id': log.id, 'timestamp': iso_ts, 'message': f"[{log.entity}] {log.message}", 'type': msg_type, 'details': log.status})
         return jsonify(data)
     except: return jsonify([])
+
+@app.route('/repair/odoo', methods=['GET'])
+def trigger_repair_odoo():
+    """Manually trigger the Odoo repair function via browser."""
+    threading.Thread(target=repair_corrupted_pos_categories).start()
+    return jsonify({"message": "Odoo Data Repair Started. Check Live Logs for results."})
 
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory_endpoint():
