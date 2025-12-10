@@ -321,8 +321,8 @@ def process_order_data(data):
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
                 
-                # Create if missing (ONLY ALLOWED HERE)
-                log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
+                # Create if missing
+                log_event('Product', 'Info', f"SKU {sku} missing. Creating...")
                 try:
                     new_p_vals = {
                         'name': item['name'],
@@ -406,6 +406,61 @@ def process_order_data(data):
             if shopify_id in active_processing_ids:
                 active_processing_ids.remove(shopify_id)
 
+def cleanup_shopify_products(odoo_active_skus):
+    """
+    Scans Shopify Products:
+    1. Archives Orphans (Products in Shopify but not active in Odoo).
+    2. Archives Duplicates (Multiple Shopify products sharing one SKU).
+    """
+    if not setup_shopify_session(): return
+    
+    seen_skus = set()
+    products = shopify.Product.find(limit=250)
+    
+    # Handle pagination manually for now or rely on first batch for efficiency
+    # For robust cleanup, loop through pages:
+    page = products
+    processed_count = 0
+    archived_count = 0
+    
+    try:
+        while page:
+            for sp in page:
+                processed_count += 1
+                variant = sp.variants[0] if sp.variants else None
+                if not variant or not variant.sku: continue
+                
+                sku = variant.sku
+                needs_archive = False
+                
+                # Check 1: Orphan (Not in Odoo Active List)
+                if sku not in odoo_active_skus:
+                    needs_archive = True
+                    log_event('System', 'Info', f"Cleanup: SKU {sku} not found in Odoo (Orphan). Archiving in Shopify.")
+                
+                # Check 2: Duplicate (Already seen in this scan)
+                elif sku in seen_skus:
+                    needs_archive = True
+                    log_event('System', 'Info', f"Cleanup: SKU {sku} is a duplicate in Shopify. Archiving.")
+                
+                if needs_archive:
+                    if sp.status != 'archived':
+                        sp.status = 'archived'
+                        sp.save()
+                        archived_count += 1
+                else:
+                    seen_skus.add(sku)
+            
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+    except Exception as e:
+        print(f"Cleanup Error: {e}")
+        
+    if archived_count > 0:
+        log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} products.")
+
 # --- PRODUCTS SYNC (Master) ---
 def sync_products_master():
     """Odoo -> Shopify Product Sync (Efficient: Only Updates if Changed)"""
@@ -415,7 +470,11 @@ def sync_products_master():
             return
 
         company_id = get_config('odoo_company_id')
+        # Fetch all Odoo products to build the Master SKU list
         odoo_products = odoo.get_all_products(company_id)
+        
+        # Collect SKUs of ACTIVE Odoo products for cleanup phase
+        active_odoo_skus = set()
         
         log_event('Product Sync', 'Info', f"Found {len(odoo_products)} products. Starting Master Sync...")
         
@@ -424,11 +483,25 @@ def sync_products_master():
             sku = p.get('default_code')
             if not sku: continue
 
-            # IGNORE ARCHIVED COMPLETELY (User Request)
+            # HANDLE ARCHIVED IN ODOO
             if not p.get('active', True):
-                continue 
+                # If archived in Odoo, ensure it is archived in Shopify
+                # We do NOT update other details, just status.
+                shopify_id = find_shopify_product_by_sku(sku)
+                if shopify_id:
+                    try:
+                        sp = shopify.Product.find(shopify_id)
+                        if sp.status != 'archived':
+                            sp.status = 'archived'
+                            sp.save()
+                            log_event('Product Sync', 'Info', f"Archived {sku} in Shopify (Matched Odoo status).")
+                    except: pass
+                continue # Skip rest of loop for archived items
 
-            # --- ACTIVE PRODUCT LOGIC ---
+            # Add to active set for cleanup later
+            active_odoo_skus.add(sku)
+
+            # --- ACTIVE PRODUCT SYNC ---
             shopify_id = find_shopify_product_by_sku(sku)
             try:
                 if shopify_id:
@@ -490,10 +563,8 @@ def sync_products_master():
                     product_changed = True
 
                 # Status
-                # Ensure active products are active in Shopify
-                target_status = 'active'
-                if sp.status != target_status:
-                    sp.status = target_status
+                if sp.status != 'active':
+                    sp.status = 'active'
                     product_changed = True
                 
                 if product_changed or not shopify_id:
@@ -551,13 +622,13 @@ def sync_products_master():
                         )
                     except: pass
 
-                # Image Sync
-                if not sp.images:
-                    img_data = odoo.get_product_image(p['id'])
-                    if img_data:
-                        image = shopify.Image(prefix_options={'product_id': sp.id})
-                        image.attachment = img_data
-                        image.save()
+                # Image Sync (Stronger Logic: If Odoo has one and Shopify has NONE, push it)
+                img_data = odoo.get_product_image(p['id'])
+                if img_data and not sp.images:
+                    image = shopify.Image(prefix_options={'product_id': sp.id})
+                    image.attachment = img_data
+                    image.save()
+                    log_event('Product Sync', 'Info', f" synced Image for {sku}")
                 
                 # Metafield Sync
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
@@ -574,6 +645,12 @@ def sync_products_master():
                 synced += 1
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
+        
+        # --- CLEANUP PHASE ---
+        # Now that we know what *should* be in Shopify (active_odoo_skus),
+        # we check Shopify for anything else (Orphans/Duplicates) and archive them.
+        cleanup_shopify_products(active_odoo_skus)
+        
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
 def sync_categories_only():
@@ -778,56 +855,6 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35) # 35 mins to cover overlapping
         if u > 0: # Only log if we actually did something to avoid spam
             log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
-
-# --- NEW: FIRST TIME CATEGORY SYNC ---
-def sync_categories_only():
-    """Run ONE-TIME import of Categories from Shopify to Odoo for existing products."""
-    with app.app_context():
-        if not odoo or not setup_shopify_session(): 
-            log_event('System', 'Error', "Category Sync Failed: Connection Error")
-            return
-
-        company_id = get_config('odoo_company_id')
-        odoo_products = odoo.get_all_products(company_id)
-        log_event('System', 'Info', f"Starting Category-Only Sync for {len(odoo_products)} products...")
-        
-        updated_count = 0
-        
-        for p in odoo_products:
-            sku = p.get('default_code')
-            if not sku: continue
-            
-            # Skip if Odoo already has a category
-            if p.get('public_categ_ids'):
-                continue
-
-            # Fetch from Shopify
-            shopify_id = find_shopify_product_by_sku(sku)
-            if not shopify_id: continue
-            
-            try:
-                sp = shopify.Product.find(shopify_id)
-                product_type = sp.product_type
-                
-                if product_type:
-                    # Search/Create category in Odoo
-                    cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.public.category', 'search', [[['name', '=', product_type]]])
-                    
-                    cat_id = cat_ids[0] if cat_ids else None
-                    if not cat_id:
-                        cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.public.category', 'create', [{'name': product_type}])
-                    
-                    # Link to Product
-                    odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
-                    
-                    updated_count += 1
-            except Exception as e:
-                print(f"Error syncing category for {sku}: {e}")
-        
-        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
 # --- ROUTES ---
 
