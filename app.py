@@ -697,7 +697,8 @@ def sync_inventory():
                 if u: company_id = u[0]['company_id'][0]
             except: pass
 
-        last_run = datetime.utcnow() - timedelta(minutes=35)
+        # CHANGED: Lookback increased to 365 days for Manual Sync
+        last_run = datetime.utcnow() - timedelta(days=365)
         try: 
             product_ids = odoo.get_changed_products(str(last_run), company_id)
         except: 
