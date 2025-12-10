@@ -654,55 +654,80 @@ def sync_products_master():
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
 def sync_categories_only():
-    """Run ONE-TIME import of Categories from Shopify to Odoo for existing products."""
+    """
+    Optimized ONE-TIME import of Categories from Shopify to Odoo.
+    Iterates Shopify products (Source of Truth) to populate Odoo.
+    """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Category Sync Failed: Connection Error")
             return
 
-        company_id = get_config('odoo_company_id')
-        odoo_products = odoo.get_all_products(company_id)
-        log_event('System', 'Info', f"Starting Category-Only Sync for {len(odoo_products)} products...")
+        log_event('System', 'Info', "Starting Optimized Category Sync...")
         
+        # 1. Build Odoo Cache (SKU -> Product Data) to avoid N+1 queries
+        company_id = get_config('odoo_company_id')
+        odoo_prods = odoo.get_all_products(company_id)
+        odoo_map = {p['default_code']: p for p in odoo_prods if p.get('default_code')}
+        
+        # 2. Build Category Cache (Name -> ID)
+        cat_map = {}
+        try:
+            cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.public.category', 'search_read', [[]], {'fields': ['id', 'name']})
+            for c in cats:
+                cat_map[c['name']] = c['id']
+        except Exception as e:
+            print(f"Cache Error: {e}")
+
         updated_count = 0
         
-        for p in odoo_products:
-            sku = p.get('default_code')
-            if not sku: continue
-            
-            # Skip if Odoo already has a category
-            if p.get('public_categ_ids'):
-                continue
-
-            # Skip Archived Products (User Request)
-            if not p.get('active', True):
-                continue
-
-            # Fetch from Shopify
-            shopify_id = find_shopify_product_by_sku(sku)
-            if not shopify_id: continue
-            
-            try:
-                sp = shopify.Product.find(shopify_id)
-                product_type = sp.product_type
+        # 3. Iterate Shopify Products (Batch Processing)
+        page = shopify.Product.find(limit=250)
+        while page:
+            for sp in page:
+                if not sp.product_type: continue
                 
-                if product_type:
-                    # Search/Create category in Odoo
-                    cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.public.category', 'search', [[['name', '=', product_type]]])
+                # Get SKU from first variant
+                variant = sp.variants[0] if sp.variants else None
+                if not variant or not variant.sku: continue
+                sku = variant.sku
+                
+                # Find in Odoo Cache
+                odoo_prod = odoo_map.get(sku)
+                if not odoo_prod: continue
+                
+                # Skip if Odoo already has a category
+                if odoo_prod.get('public_categ_ids'): continue
+                
+                # Skip if Archived in Odoo
+                if not odoo_prod.get('active', True): continue
+
+                try:
+                    cat_name = sp.product_type
                     
-                    cat_id = cat_ids[0] if cat_ids else None
+                    # Resolve Category ID (Use Cache or Create)
+                    cat_id = cat_map.get(cat_name)
                     if not cat_id:
                         cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.public.category', 'create', [{'name': product_type}])
+                            'product.public.category', 'create', [{'name': cat_name}])
+                        cat_map[cat_name] = cat_id # Update cache
                     
-                    # Link to Product
+                    # Write to Odoo
                     odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
+                        'product.product', 'write', [[odoo_prod['id']], {'public_categ_ids': [(4, cat_id)]}])
                     
                     updated_count += 1
-            except Exception as e:
-                print(f"Error syncing category for {sku}: {e}")
+                    # Update local cache to prevent re-processing if SKU duplicates exist (rare but possible)
+                    odoo_prod['public_categ_ids'] = [cat_id] 
+                    
+                except Exception as e:
+                    print(f"Error syncing category for {sku}: {e}")
+
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
         
         log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
