@@ -172,12 +172,11 @@ def get_shopify_variant_inv_by_sku(sku):
 # --- CORE LOGIC ---
 
 def process_order_data(data):
-    """Syncs order. Includes concurrency locking to prevent duplicates."""
+    """Syncs order. UPDATES existing orders instead of skipping, preventing duplicates."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
     # 1. CONCURRENCY CHECK
-    # Check if this specific order ID is already being processed by another thread
     with order_processing_lock:
         if shopify_id in active_processing_ids:
             log_event('Order', 'Skipped', f"Order {shopify_name} skipped (Concurrent process detected).")
@@ -196,17 +195,14 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
-        # 2. DUPLICATE CHECK (ODOO)
+        # 2. CHECK EXISTING (Store ID, do not return yet)
+        existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+            if existing_ids:
+                existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
-
-        if existing_ids:
-            # FIXED LOGIC: If it exists, we skip it entirely to prevent duplicates/overwrites
-            # Changed log level to 'Warning' (yellow) so it's distinct from success
-            log_event('Order', 'Warning', f"Skipped {client_ref}: Order already synced in Odoo.")
-            return True, "Skipped"
 
         # 3. Customer Resolution
         partner = odoo.search_partner_by_email(email)
@@ -228,7 +224,7 @@ def process_order_data(data):
                 partner = {'id': partner_id, 'name': name, 'parent_id': False}
                 log_event('Customer', 'Success', f"Created Customer: {name}")
                 
-                if shopify_id: # Use order ID as fallback if cust ID missing, though unlikely
+                if shopify_id:
                     c_id = str(data.get('customer', {}).get('id'))
                     if c_id:
                         cust_map = CustomerMap(shopify_customer_id=c_id, odoo_partner_id=partner_id, email=email)
@@ -297,23 +293,51 @@ def process_order_data(data):
 
         if not lines: return False, "No valid lines"
         
-        # 5. Create Order
-        vals = {
-            'name': client_ref, 'client_order_ref': client_ref,
-            'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
-            'order_line': lines, 
-            'user_id': sales_rep_id,
-            'state': 'draft'
-        }
-        if company_id: vals['company_id'] = int(company_id)
-        
-        try:
-            odoo.create_sale_order(vals, context={'manual_price': True})
-            log_event('Order', 'Success', f"Synced {client_ref}")
-            return True, "Synced"
-        except Exception as e:
-            log_event('Order', 'Error', str(e))
-            return False, str(e)
+        # 5. SYNC LOGIC (Create OR Update)
+        if existing_order_id:
+            # --- UPDATE PATH ---
+            # Check status first
+            order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'read', [[existing_order_id]], {'fields': ['state']})
+            state = order_info[0]['state'] if order_info else 'unknown'
+
+            if state in ['done', 'cancel']:
+                log_event('Order', 'Skipped', f"Order {client_ref} is {state}. Update skipped.")
+                return True, "Skipped"
+            
+            # Update Strategy: (5,0,0) removes all existing lines, then we add the new ones
+            update_vals = {
+                'order_line': [(5, 0, 0)] + lines,
+                'partner_shipping_id': shipping_id,
+                'partner_invoice_id': invoice_id
+            }
+            
+            try:
+                odoo.update_sale_order(existing_order_id, update_vals)
+                log_event('Order', 'Success', f"Updated {client_ref} (Revision)")
+                return True, "Updated"
+            except Exception as e:
+                log_event('Order', 'Error', f"Update Failed: {e}")
+                return False, str(e)
+
+        else:
+            # --- CREATE PATH ---
+            vals = {
+                'name': client_ref, 'client_order_ref': client_ref,
+                'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
+                'order_line': lines, 
+                'user_id': sales_rep_id,
+                'state': 'draft'
+            }
+            if company_id: vals['company_id'] = int(company_id)
+            
+            try:
+                odoo.create_sale_order(vals, context={'manual_price': True})
+                log_event('Order', 'Success', f"Synced {client_ref}")
+                return True, "Synced"
+            except Exception as e:
+                log_event('Order', 'Error', str(e))
+                return False, str(e)
 
     finally:
         # ALWAYS release the lock for this ID
