@@ -582,6 +582,11 @@ def dashboard():
                            logs_customers=logs_customers, logs_system=logs_system,
                            odoo_status=odoo_status, current_settings=current_settings)
 
+# --- NEW ROUTE FOR LIVE LOGS ---
+@app.route('/live_logs')
+def live_logs():
+    return render_template('live_logs.html')
+
 @app.route('/sync/products/master', methods=['POST'])
 def trigger_master_sync():
     threading.Thread(target=sync_products_master).start()
