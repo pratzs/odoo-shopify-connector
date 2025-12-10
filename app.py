@@ -642,9 +642,15 @@ def api_live_logs():
             elif 'success' in status_lower: msg_type = 'success'
             elif 'warning' in status_lower or 'skip' in status_lower: msg_type = 'warning'
             
+            # FORCE UTC INDICATOR: The DB stores UTC (naive), so we must tell the frontend it's UTC ('Z')
+            # otherwise the browser treats it as local time, resulting in the wrong display.
+            iso_ts = log.timestamp.isoformat()
+            if not iso_ts.endswith('Z'):
+                iso_ts += 'Z'
+
             data.append({
                 'id': log.id,
-                'timestamp': log.timestamp.isoformat(),
+                'timestamp': iso_ts,
                 'message': f"[{log.entity}] {log.message}", 
                 'type': msg_type,
                 'details': log.status
