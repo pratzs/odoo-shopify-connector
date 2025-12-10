@@ -51,6 +51,7 @@ with app.app_context():
         print(f"CRITICAL DB INIT ERROR: {e}")
 
 # --- GLOBAL LOCKS FOR CONCURRENCY CONTROL ---
+# This prevents the same order from being processed by multiple threads/webhooks simultaneously
 order_processing_lock = threading.Lock()
 active_processing_ids = set()
 
@@ -175,6 +176,7 @@ def process_product_data(data):
     Handles Shopify Product Webhooks (Create/Update).
     1. Creates missing products in Odoo (Skeleton only).
     2. Syncs 'Product Type' -> Odoo 'Ecommerce Category'.
+    3. Does NOT overwrite Price/Stock on updates (Odoo is Master).
     """
     product_type = data.get('product_type', '')
     
@@ -192,42 +194,53 @@ def process_product_data(data):
         except Exception as e:
             print(f"Category Logic Error: {e}")
 
-    # 2. Iterate Variants
+    # 2. Iterate Variants (Shopify Product -> Odoo Variants)
     variants = data.get('variants', [])
     processed_count = 0
     company_id = get_config('odoo_company_id')
     
     for v in variants:
         sku = v.get('sku')
-        if not sku: continue 
+        if not sku: continue # Skip products without SKU
         
+        # Check if exists in Odoo
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if not product_id:
-            # Create
+            # --- CREATE LOGIC ---
             log_event('Product', 'Info', f"Webhook: Creating new SKU {sku} from Shopify")
             try:
                 new_vals = {
                     'name': data.get('title') + (f" - {v.get('title')}" if v.get('title') != 'Default Title' else ""),
                     'default_code': sku,
                     'type': 'product',
-                    'active': True,
+                    'active': True, # Published by default
                     'list_price': float(v.get('price', 0.0)),
                     'weight': float(v.get('weight', 0.0))
                 }
-                if company_id: new_vals['company_id'] = int(company_id)
-                if cat_id: new_vals['public_categ_ids'] = [(4, cat_id)]
                 
+                if company_id: new_vals['company_id'] = int(company_id)
+
+                # Apply Category if found
+                if cat_id:
+                    new_vals['public_categ_ids'] = [(4, cat_id)]
+                
+                # Create
                 odoo.create_product(new_vals)
                 processed_count += 1
             except Exception as e:
                 log_event('Product', 'Error', f"Webhook Create Failed for {sku}: {e}")
+        
         else:
-            # Update (Category Only)
+            # --- UPDATE LOGIC (Category Only) ---
+            # We ONLY update the category to match Shopify Product Type.
+            # We do NOT update price/name/stock to preserve Odoo as Master.
             if cat_id:
                 try:
+                    # Check current category to avoid redundant writes
                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
+                    
                     current_cat_ids = current_prod[0].get('public_categ_ids', [])
                     
                     if cat_id not in current_cat_ids:
@@ -241,10 +254,11 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order with concurrency check."""
+    """Syncs order. UPDATES existing orders instead of skipping, preventing duplicates."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
+    # 1. CONCURRENCY CHECK
     with order_processing_lock:
         if shopify_id in active_processing_ids:
             log_event('Order', 'Skipped', f"Order {shopify_name} skipped (Concurrent process detected).")
@@ -263,6 +277,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
+        # 2. CHECK EXISTING (Store ID, do not return yet)
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -271,9 +286,11 @@ def process_order_data(data):
                 existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
+        # 3. Customer Resolution
         partner = odoo.search_partner_by_email(email)
         
         if not partner:
+            # Create Customer
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
@@ -288,37 +305,51 @@ def process_order_data(data):
                 partner_id = odoo.create_partner(vals)
                 partner = {'id': partner_id, 'name': name, 'parent_id': False}
                 log_event('Customer', 'Success', f"Created Customer: {name}")
+                
                 if shopify_id:
                     c_id = str(data.get('customer', {}).get('id'))
                     if c_id:
                         cust_map = CustomerMap(shopify_customer_id=c_id, odoo_partner_id=partner_id, email=email)
                         db.session.add(cust_map)
                         db.session.commit()
+
             except Exception as e:
                 return False, f"Customer Error: {e}"
         
         partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+        
+        # Salesperson
         sales_rep_id = odoo.get_partner_salesperson(partner_id)
         if not sales_rep_id: sales_rep_id = odoo.uid
+
+        # Addresses
         shipping_id = partner_id 
         invoice_id = partner_id 
 
+        # 4. Build Lines
         lines = []
         for item in data.get('line_items', []):
             sku = item.get('sku')
             if not sku: continue
 
+            # Search Product
             product_id = odoo.search_product_by_sku(sku, company_id)
+            
             if not product_id:
+                # Check Archived
                 archived_id = odoo.check_product_exists_by_sku(sku, company_id)
                 if archived_id:
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
                 
+                # Create if missing
                 log_event('Product', 'Info', f"SKU {sku} missing. Creating...")
                 try:
                     new_p_vals = {
-                        'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'
+                        'name': item['name'],
+                        'default_code': sku,
+                        'list_price': float(item.get('price', 0)),
+                        'type': 'product'
                     }
                     if company_id: new_p_vals['company_id'] = int(company_id)
                     odoo.create_product(new_p_vals)
@@ -331,19 +362,38 @@ def process_order_data(data):
                 qty = int(item.get('quantity', 1))
                 disc = float(item.get('total_discount', 0))
                 pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
-                lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}))
+                
+                lines.append((0, 0, {
+                    'product_id': product_id, 
+                    'product_uom_qty': qty, 
+                    'price_unit': price, 
+                    'name': item['name'], 
+                    'discount': pct
+                }))
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
         if not lines: return False, "No valid lines"
         
+        # 5. SYNC LOGIC (Create OR Update)
         if existing_order_id:
-            order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state']})
+            # --- UPDATE PATH ---
+            # Check status first
+            order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'read', [[existing_order_id]], {'fields': ['state']})
             state = order_info[0]['state'] if order_info else 'unknown'
+
             if state in ['done', 'cancel']:
                 log_event('Order', 'Skipped', f"Order {client_ref} is {state}. Update skipped.")
                 return True, "Skipped"
-            update_vals = {'order_line': [(5, 0, 0)] + lines, 'partner_shipping_id': shipping_id, 'partner_invoice_id': invoice_id}
+            
+            # Update Strategy: (5,0,0) removes all existing lines, then we add the new ones
+            update_vals = {
+                'order_line': [(5, 0, 0)] + lines,
+                'partner_shipping_id': shipping_id,
+                'partner_invoice_id': invoice_id
+            }
+            
             try:
                 odoo.update_sale_order(existing_order_id, update_vals)
                 log_event('Order', 'Success', f"Updated {client_ref} (Revision)")
@@ -351,9 +401,18 @@ def process_order_data(data):
             except Exception as e:
                 log_event('Order', 'Error', f"Update Failed: {e}")
                 return False, str(e)
+
         else:
-            vals = {'name': client_ref, 'client_order_ref': client_ref, 'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft'}
+            # --- CREATE PATH ---
+            vals = {
+                'name': client_ref, 'client_order_ref': client_ref,
+                'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id,
+                'order_line': lines, 
+                'user_id': sales_rep_id,
+                'state': 'draft'
+            }
             if company_id: vals['company_id'] = int(company_id)
+            
             try:
                 odoo.create_sale_order(vals, context={'manual_price': True})
                 log_event('Order', 'Success', f"Synced {client_ref}")
@@ -361,25 +420,34 @@ def process_order_data(data):
             except Exception as e:
                 log_event('Order', 'Error', str(e))
                 return False, str(e)
+
     finally:
+        # ALWAYS release the lock for this ID
         with order_processing_lock:
             if shopify_id in active_processing_ids:
                 active_processing_ids.remove(shopify_id)
 
+# --- PRODUCTS SYNC (Master) ---
 def sync_products_master():
-    """Odoo -> Shopify Product Sync"""
+    """Odoo -> Shopify Product Sync (Efficient: Only Updates if Changed)"""
     with app.app_context():
-        if not odoo or not setup_shopify_session(): return
+        if not odoo or not setup_shopify_session(): 
+            log_event('System', 'Error', "Product Sync Failed: Connection Error")
+            return
+
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
+        
         log_event('Product Sync', 'Info', f"Found {len(odoo_products)} products. Starting Master Sync...")
         
         synced = 0
         for p in odoo_products:
             sku = p.get('default_code')
             if not sku: continue
+
             target_status = 'active' if p.get('active', True) else 'archived'
             
+            # --- ARCHIVED LOGIC FIX ---
             if target_status == 'archived':
                 shopify_id = find_shopify_product_by_sku(sku)
                 if shopify_id:
@@ -392,54 +460,82 @@ def sync_products_master():
                     except: pass
                 continue 
 
+            # --- ACTIVE PRODUCT LOGIC ---
             shopify_id = find_shopify_product_by_sku(sku)
             try:
-                if shopify_id: sp = shopify.Product.find(shopify_id)
-                else: sp = shopify.Product()
+                if shopify_id:
+                    sp = shopify.Product.find(shopify_id)
+                else:
+                    sp = shopify.Product()
+                
                 product_changed = False
                 
+                # Title
                 if sp.title != p['name']:
                     sp.title = p['name']
                     product_changed = True
-                
+
+                # Description
                 odoo_desc = p.get('description_sale') or ''
                 if (sp.body_html or '') != odoo_desc:
                     sp.body_html = odoo_desc
                     product_changed = True
                 
+                # --- SMART CATEGORY SYNC ---
+                # 1. If Odoo Category is EMPTY -> Import from Shopify (One-time init)
+                # 2. If Odoo Category is SET -> Export to Shopify (Odoo Master)
+                
                 odoo_categ_ids = p.get('public_categ_ids', [])
+                
                 if not odoo_categ_ids and sp.product_type:
+                    # CASE 1: Odoo is empty, populate from Shopify (One-time)
                     try:
                         cat_name = sp.product_type
-                        cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
+                        cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.public.category', 'search', [[['name', '=', cat_name]]])
+                        
                         cat_id = cat_ids[0] if cat_ids else None
                         if not cat_id:
-                            cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'create', [{'name': cat_name}])
-                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
-                        log_event('Product Sync', 'Info', f"Initialized Odoo Category for {sku}: {cat_name}")
-                    except Exception as e: print(f"Category Import Error: {e}")
+                            cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                'product.public.category', 'create', [{'name': cat_name}])
+                        
+                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
+                        log_event('Product Sync', 'Info', f"Initialized Odoo Category for {sku} from Shopify: {cat_name}")
+                    except Exception as e:
+                        print(f"Category Import Error: {e}")
+                
                 elif odoo_categ_ids:
+                    # CASE 2: Odoo has data, enforce Odoo as Master
                     odoo_cat_name = odoo.get_public_category_name(odoo_categ_ids)
+                    # If Odoo has a category, make sure Shopify matches it
                     if odoo_cat_name and sp.product_type != odoo_cat_name:
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
+                # Vendor Mapping
                 product_title = p.get('name', '')
                 target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
                 if sp.vendor != target_vendor:
                     sp.vendor = target_vendor
                     product_changed = True
 
+                # Status
                 if sp.status != target_status:
                     sp.status = target_status
                     product_changed = True
                 
-                if product_changed or not shopify_id: sp.save()
+                if product_changed or not shopify_id:
+                    sp.save()
                 
-                if sp.variants: variant = sp.variants[0]
-                else: variant = shopify.Variant()
+                # Variant Logic
+                if sp.variants:
+                    variant = sp.variants[0]
+                else:
+                    variant = shopify.Variant()
                 
                 variant_changed = False
+                
                 if variant.sku != sku:
                     variant.sku = sku
                     variant_changed = True
@@ -449,36 +545,197 @@ def sync_products_master():
                     variant.price = target_price
                     variant_changed = True
 
-                if variant_changed or not shopify_id: variant.save()
+                target_barcode = p.get('barcode', 0) or ''
+                if str(variant.barcode or '') != str(target_barcode):
+                    variant.barcode = str(target_barcode)
+                    variant_changed = True
                 
-                # Inventory sync inside master sync
+                try:
+                    if float(variant.weight or 0) != float(p.get('weight', 0)):
+                        variant.weight = p.get('weight', 0)
+                        variant_changed = True
+                except:
+                    variant.weight = p.get('weight', 0)
+                    variant_changed = True
+
+                if variant.inventory_management != 'shopify':
+                    variant.inventory_management = 'shopify'
+                    variant_changed = True
+                
+                if str(variant.product_id) != str(sp.id):
+                    variant.product_id = sp.id
+                    variant_changed = True
+
+                if variant_changed or not shopify_id:
+                    variant.save()
+                
+                # Inventory Sync
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
                     qty = int(p.get('qty_available', 0))
-                    try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
+                    try:
+                        shopify.InventoryLevel.set(
+                            location_id=SHOPIFY_LOCATION_ID,
+                            inventory_item_id=variant.inventory_item_id,
+                            available=qty
+                        )
                     except: pass
 
+                # Image Sync
+                if not sp.images:
+                    img_data = odoo.get_product_image(p['id'])
+                    if img_data:
+                        image = shopify.Image(prefix_options={'product_id': sp.id})
+                        image.attachment = img_data
+                        image.save()
+                
+                # Metafield Sync
+                vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
+                if vendor_code:
+                    metafield = shopify.Metafield({
+                        'key': 'vendor_product_code',
+                        'value': vendor_code,
+                        'type': 'single_line_text_field',
+                        'namespace': 'custom',
+                        'owner_resource': 'product',
+                        'owner_id': sp.id
+                    })
+                    metafield.save()
                 synced += 1
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
-        log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} products.")
+        log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
+
+def sync_categories_only():
+    """Run ONE-TIME import of Categories from Shopify to Odoo for existing products."""
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): 
+            log_event('System', 'Error', "Category Sync Failed: Connection Error")
+            return
+
+        company_id = get_config('odoo_company_id')
+        odoo_products = odoo.get_all_products(company_id)
+        log_event('System', 'Info', f"Starting Category-Only Sync for {len(odoo_products)} products...")
+        
+        updated_count = 0
+        
+        for p in odoo_products:
+            sku = p.get('default_code')
+            if not sku: continue
+            
+            # Skip if Odoo already has a category
+            if p.get('public_categ_ids'):
+                continue
+
+            # Fetch from Shopify
+            shopify_id = find_shopify_product_by_sku(sku)
+            if not shopify_id: continue
+            
+            try:
+                sp = shopify.Product.find(shopify_id)
+                product_type = sp.product_type
+                
+                if product_type:
+                    # Search/Create category in Odoo
+                    cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.public.category', 'search', [[['name', '=', product_type]]])
+                    
+                    cat_id = cat_ids[0] if cat_ids else None
+                    if not cat_id:
+                        cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.public.category', 'create', [{'name': product_type}])
+                    
+                    # Link to Product
+                    odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
+                    
+                    updated_count += 1
+            except Exception as e:
+                print(f"Error syncing category for {sku}: {e}")
+        
+        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
 def sync_customers_master():
     """Odoo -> Shopify Customer Sync"""
     with app.app_context():
-        if not get_config('cust_auto_sync', False): return
-        # ... (Rest of customer sync code same as before, simplified for brevity) ...
-        # Assume previous customer sync logic is here
-        log_event('Customer Sync', 'Success', "Customer Sync Checked.")
+        if not get_config('cust_auto_sync', False):
+            log_event('Customer Sync', 'Skipped', 'Auto sync disabled.')
+            return
+
+        sync_tags_enabled = get_config('cust_sync_tags', False)
+        whitelist_raw = get_config('cust_whitelist_tags', '')
+        blacklist_raw = get_config('cust_blacklist_tags', '')
+        whitelist_tags = {t.strip().lower() for t in whitelist_raw.split(',') if t.strip()}
+        blacklist_tags = {t.strip().lower() for t in blacklist_raw.split(',') if t.strip()}
+
+        last_sync_key = 'cust_last_sync'
+        last_sync_str = get_config(last_sync_key, (datetime.utcnow() - timedelta(hours=24)).isoformat())
+        last_sync_dt = datetime.fromisoformat(last_sync_str)
+        company_id = get_config('odoo_company_id')
+        
+        if not odoo or not setup_shopify_session(): return
+        odoo_customers = odoo.get_changed_customers(last_sync_dt.strftime('%Y-%m-%d %H:%M:%S'), company_id)
+        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers changed.")
+        
+        synced_count = 0
+        current_time_str = datetime.utcnow().isoformat()
+        
+        for oc in odoo_customers:
+            odoo_id = oc['id']
+            email = oc['email']
+
+            if sync_tags_enabled:
+                odoo_partner_tags = {tag[1].lower() for tag in oc.get('category_id') or []}
+                if odoo_partner_tags.intersection(blacklist_tags): continue
+                if whitelist_tags and not odoo_partner_tags.intersection(whitelist_tags): continue
+            
+            cust_map = CustomerMap.query.filter_by(odoo_partner_id=odoo_id).first()
+            shopify_cust_id = cust_map.shopify_customer_id if cust_map else None
+
+            sc = None
+            if shopify_cust_id:
+                try: sc = shopify.Customer.find(shopify_cust_id)
+                except: shopify_cust_id = None
+            
+            if not sc and email:
+                search_results = shopify.Customer.search(query=f'email:{email}')
+                if search_results: sc = search_results[0]
+            
+            if not sc: sc = shopify.Customer()
+            
+            name_parts = oc['name'].split()
+            sc.email = email
+            sc.first_name = name_parts[0] if name_parts else ''
+            sc.last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ''
+            sc.phone = oc['phone']
+            address_data = {'address1': oc.get('street'), 'city': oc.get('city'), 'zip': oc.get('zip'), 'country_id': oc.get('country_id')[0] if oc.get('country_id') else None}
+            sc.addresses = [address_data] if any(address_data.values()) else []
+            
+            if sync_tags_enabled:
+                odoo_tags = [tag[1] for tag in oc.get('category_id') or []]
+                sc.tags = ",".join(odoo_tags)
+                
+            if sc.save():
+                synced_count += 1
+                if not cust_map:
+                    cust_map = CustomerMap(shopify_customer_id=str(sc.id), odoo_partner_id=odoo_id, email=email)
+                    db.session.add(cust_map)
+                log_event('Customer Sync', 'Success', f"Synced {oc['name']}")
+        
+        db.session.commit()
+        set_config(last_sync_key, current_time_str)
+        log_event('Customer Sync', 'Success', f"Customer Sync Complete. Processed {synced_count} updates.")
 
 def archive_shopify_duplicates():
     with app.app_context():
         if not setup_shopify_session(): return
+        log_event('Duplicate Scan', 'Info', "Starting Scan...")
         sku_map = {}
         variants = shopify.Variant.find(limit=250)
         for v in variants:
             if not v.sku: continue
             if v.sku not in sku_map: sku_map[v.sku] = []
             sku_map[v.sku].append(v)
+        count = 0
         for sku, var_list in sku_map.items():
             if len(var_list) > 1:
                 var_list.sort(key=lambda x: x.id, reverse=True)
@@ -487,7 +744,11 @@ def archive_shopify_duplicates():
                         prod = shopify.Product.find(dup.product_id)
                         prod.status = 'archived'
                         prod.save()
-                    except: pass
+                        count += 1
+                    except Exception as e:
+                        print(f"Archive fail: {e}")
+        if count == 0: log_event('Duplicate Scan', 'Success', "Clean!")
+        else: log_event('Duplicate Scan', 'Success', f"Archived {count} duplicate products.")
 
 # --- INVENTORY SYNC (SPLIT LOGIC) ---
 def perform_inventory_sync(lookback_minutes):
@@ -543,6 +804,56 @@ def scheduled_inventory_sync():
         if u > 0: # Only log if we actually did something to avoid spam
             log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
+# --- NEW: FIRST TIME CATEGORY SYNC ---
+def sync_categories_only():
+    """Run ONE-TIME import of Categories from Shopify to Odoo for existing products."""
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): 
+            log_event('System', 'Error', "Category Sync Failed: Connection Error")
+            return
+
+        company_id = get_config('odoo_company_id')
+        odoo_products = odoo.get_all_products(company_id)
+        log_event('System', 'Info', f"Starting Category-Only Sync for {len(odoo_products)} products...")
+        
+        updated_count = 0
+        
+        for p in odoo_products:
+            sku = p.get('default_code')
+            if not sku: continue
+            
+            # Skip if Odoo already has a category
+            if p.get('public_categ_ids'):
+                continue
+
+            # Fetch from Shopify
+            shopify_id = find_shopify_product_by_sku(sku)
+            if not shopify_id: continue
+            
+            try:
+                sp = shopify.Product.find(shopify_id)
+                product_type = sp.product_type
+                
+                if product_type:
+                    # Search/Create category in Odoo
+                    cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.public.category', 'search', [[['name', '=', product_type]]])
+                    
+                    cat_id = cat_ids[0] if cat_ids else None
+                    if not cat_id:
+                        cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.public.category', 'create', [{'name': product_type}])
+                    
+                    # Link to Product
+                    odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
+                    
+                    updated_count += 1
+            except Exception as e:
+                print(f"Error syncing category for {sku}: {e}")
+        
+        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
+
 # --- ROUTES ---
 
 @app.route('/')
@@ -580,6 +891,12 @@ def sync_inventory_endpoint():
         c, u = perform_inventory_sync(lookback_minutes=525600) # 365 Days
         log_event('Inventory', 'Success', f"Manual Sync Complete. Checked {c}, Updated {u}")
         return jsonify({"synced": c, "updates": u})
+
+# --- ROUTE FOR FIRST TIME CATEGORY SYNC ---
+@app.route('/sync/categories/run_initial_import', methods=['GET'])
+def run_initial_category_import():
+    threading.Thread(target=sync_categories_only).start()
+    return jsonify({"message": "Job Started: Syncing Categories from Shopify for products with empty Odoo categories."})
 
 # --- PRODUCT WEBHOOKS ---
 @app.route('/webhook/products/create', methods=['POST'])
