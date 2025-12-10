@@ -401,7 +401,9 @@ def sync_products_master():
                 
                 # Product Type Mapping
                 categ_name = odoo.get_public_category_name(p.get('public_categ_ids'))
-                target_type = categ_name if categ_name else 'Storable Product'
+                # UPDATED FIX: If categ_name is empty, use empty string instead of 'Storable Product'
+                target_type = categ_name if categ_name else ""
+                
                 if sp.product_type != target_type:
                     sp.product_type = target_type
                     product_changed = True
