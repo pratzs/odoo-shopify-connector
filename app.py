@@ -399,15 +399,34 @@ def sync_products_master():
                     sp.body_html = odoo_desc
                     product_changed = True
                 
-                # Product Type Mapping
-                categ_name = odoo.get_public_category_name(p.get('public_categ_ids'))
-                # UPDATED FIX: If categ_name is empty, use empty string instead of 'Storable Product'
-                target_type = categ_name if categ_name else ""
-                
-                if sp.product_type != target_type:
-                    sp.product_type = target_type
-                    product_changed = True
-                
+                # --- TYPE MAPPING REVERSED (Shopify -> Odoo) ---
+                # We do NOT overwrite Shopify type with Odoo category anymore.
+                # Instead, we take Shopify Type and sync it TO Odoo Categories.
+                # NOTE: 'product.public.category' is the ECOMMERCE CATEGORY in Odoo.
+                # 'categ_id' is the internal category, which we do NOT touch.
+                if sp.product_type:
+                    try:
+                        cat_name = sp.product_type
+                        # 1. Search for Ecommerce Category (public category)
+                        cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.public.category', 'search', [[['name', '=', cat_name]]])
+                        
+                        cat_id = cat_ids[0] if cat_ids else None
+                        
+                        # 2. Create if missing
+                        if not cat_id:
+                            cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                'product.public.category', 'create', [{'name': cat_name}])
+                        
+                        # 3. Link to Product via 'public_categ_ids' (Ecommerce Field)
+                        current_categ_ids = p.get('public_categ_ids', [])
+                        if cat_id not in current_categ_ids:
+                            odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
+                            log_event('Product Sync', 'Info', f"Updated Odoo Ecommerce Category for {sku} to '{cat_name}'")
+                    except Exception as e:
+                        print(f"Category Sync Error: {e}")
+
                 # Vendor Mapping
                 product_title = p.get('name', '')
                 target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
