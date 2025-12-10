@@ -173,9 +173,9 @@ def get_shopify_variant_inv_by_sku(sku):
 
 def process_product_data(data):
     """
-    Handles Shopify Product Webhooks (Create/Update).
-    1. Creates missing products in Odoo (Skeleton only).
-    2. Syncs 'Product Type' -> Odoo 'Ecommerce Category'.
+    Handles Shopify Product Webhooks (Update Only).
+    1. IGNORES new products (Does NOT create in Odoo).
+    2. Syncs 'Product Type' -> Odoo 'Ecommerce Category' for existing active products.
     3. Does NOT overwrite Price/Stock on updates (Odoo is Master).
     """
     product_type = data.get('product_type', '')
@@ -203,38 +203,12 @@ def process_product_data(data):
         sku = v.get('sku')
         if not sku: continue # Skip products without SKU
         
-        # Check if exists in Odoo
+        # Check if exists in Odoo (Active Only)
         product_id = odoo.search_product_by_sku(sku, company_id)
         
-        if not product_id:
-            # --- CREATE LOGIC ---
-            log_event('Product', 'Info', f"Webhook: Creating new SKU {sku} from Shopify")
-            try:
-                new_vals = {
-                    'name': data.get('title') + (f" - {v.get('title')}" if v.get('title') != 'Default Title' else ""),
-                    'default_code': sku,
-                    'type': 'product',
-                    'active': True, # Published by default
-                    'list_price': float(v.get('price', 0.0)),
-                    'weight': float(v.get('weight', 0.0))
-                }
-                
-                if company_id: new_vals['company_id'] = int(company_id)
-
-                # Apply Category if found
-                if cat_id:
-                    new_vals['public_categ_ids'] = [(4, cat_id)]
-                
-                # Create
-                odoo.create_product(new_vals)
-                processed_count += 1
-            except Exception as e:
-                log_event('Product', 'Error', f"Webhook Create Failed for {sku}: {e}")
-        
-        else:
+        if product_id:
             # --- UPDATE LOGIC (Category Only) ---
             # We ONLY update the category to match Shopify Product Type.
-            # We do NOT update price/name/stock to preserve Odoo as Master.
             if cat_id:
                 try:
                     # Check current category to avoid redundant writes
@@ -250,6 +224,11 @@ def process_product_data(data):
                         processed_count += 1
                 except Exception as e:
                     print(f"Webhook Update Error: {e}")
+        else:
+            # --- SKIP CREATION ---
+            # Product missing or Archived. We strictly ignore creation from direct product webhooks.
+            # Creation is only allowed via Sales Order (see process_order_data).
+            pass
 
     return processed_count
 
@@ -342,8 +321,8 @@ def process_order_data(data):
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
                 
-                # Create if missing
-                log_event('Product', 'Info', f"SKU {sku} missing. Creating...")
+                # Create if missing (ONLY ALLOWED HERE)
+                log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
                 try:
                     new_p_vals = {
                         'name': item['name'],
@@ -445,19 +424,8 @@ def sync_products_master():
             sku = p.get('default_code')
             if not sku: continue
 
-            target_status = 'active' if p.get('active', True) else 'archived'
-            
-            # --- ARCHIVED LOGIC FIX ---
-            if target_status == 'archived':
-                shopify_id = find_shopify_product_by_sku(sku)
-                if shopify_id:
-                    try:
-                        sp = shopify.Product.find(shopify_id)
-                        if sp.status != 'archived':
-                            sp.status = 'archived'
-                            sp.save()
-                            log_event('Product Sync', 'Info', f"Archived {sku} in Shopify.")
-                    except: pass
+            # IGNORE ARCHIVED COMPLETELY (User Request)
+            if not p.get('active', True):
                 continue 
 
             # --- ACTIVE PRODUCT LOGIC ---
@@ -491,6 +459,7 @@ def sync_products_master():
                     # CASE 1: Odoo is empty, populate from Shopify (One-time)
                     try:
                         cat_name = sp.product_type
+                        # Search/Create category in Odoo
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.public.category', 'search', [[['name', '=', cat_name]]])
                         
@@ -521,6 +490,8 @@ def sync_products_master():
                     product_changed = True
 
                 # Status
+                # Ensure active products are active in Shopify
+                target_status = 'active'
                 if sp.status != target_status:
                     sp.status = target_status
                     product_changed = True
@@ -624,6 +595,10 @@ def sync_categories_only():
             
             # Skip if Odoo already has a category
             if p.get('public_categ_ids'):
+                continue
+
+            # Skip Archived Products (User Request)
+            if not p.get('active', True):
                 continue
 
             # Fetch from Shopify
