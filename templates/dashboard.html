@@ -127,13 +127,25 @@
                                         <label class="form-label-sm">Select Fields to Update from Odoo</label>
                                         <div class="d-flex flex-wrap gap-3 mb-3">
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldPrice" checked disabled> <label class="form-check-label">Price</label>
+                                                <input class="form-check-input" type="checkbox" id="fieldPrice" checked disabled> <label class="form-check-label" title="Maps Odoo List Price -> Shopify Price">Price <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldTitle" checked disabled> <label class="form-check-label">Title</label>
+                                                <input class="form-check-input" type="checkbox" id="fieldTitle" checked disabled> <label class="form-check-label" title="Maps Odoo Name -> Shopify Title">Title <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldDesc" checked disabled> <label class="form-check-label">Description</label>
+                                                <input class="form-check-input" type="checkbox" id="fieldDesc" checked disabled> <label class="form-check-label" title="Maps Odoo Sales Description -> Shopify Description">Description <i class="bi bi-info-circle small text-muted"></i></label>
+                                            </div>
+                                             <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldProductType" checked disabled> <label class="form-check-label" title="Maps Odoo Ecommerce Category -> Shopify Product Type">Product Type <i class="bi bi-info-circle small text-muted"></i></label>
+                                            </div>
+                                             <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldVendor" checked disabled> <label class="form-check-label" title="Maps First Word of Odoo Name -> Shopify Vendor">Vendor <i class="bi bi-info-circle small text-muted"></i></label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldTags" {% if current_settings.prod_sync_tags %}checked{% endif %}> <label class="form-check-label" title="Maps Odoo Tags -> Shopify Tags (Appends missing tags, keeps existing)">Tags <i class="bi bi-info-circle small text-muted"></i></label>
+                                            </div>
+                                             <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if current_settings.prod_sync_meta_vendor_code %}checked{% endif %}> <label class="form-check-label" title="Maps Odoo Supplier Info -> Shopify Metafield (custom.vendor_product_code)">Vendor Code (Metafield) <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                         </div>
                                     </div>
@@ -403,6 +415,8 @@
                 prod_auto_create: document.getElementById('prodAutoCreate').checked,
                 prod_auto_publish: document.getElementById('prodAutoPublish').checked,
                 prod_sync_images: document.getElementById('prodSyncImages').checked,
+                prod_sync_tags: document.getElementById('fieldTags').checked,
+                prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
 
                 // Orders
                 order_sync_tax: document.getElementById('orderSyncTax').checked,
