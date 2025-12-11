@@ -13,6 +13,7 @@ from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 import random
+import xmlrpc.client
 
 app = Flask(__name__)
 
@@ -186,8 +187,6 @@ def process_product_data(data):
     Handles Shopify Product Webhooks (Update Only).
     """
     product_type = data.get('product_type', '')
-    
-    # 1. Resolve Category ID (Shopify Type -> Odoo Public Category)
     cat_id = None
     if product_type:
         try:
@@ -201,7 +200,6 @@ def process_product_data(data):
         except Exception as e:
             print(f"Category Logic Error: {e}")
 
-    # 2. Iterate Variants
     variants = data.get('variants', [])
     processed_count = 0
     company_id = get_config('odoo_company_id')
@@ -209,17 +207,14 @@ def process_product_data(data):
     for v in variants:
         sku = v.get('sku')
         if not sku: continue
-        
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
-            # --- UPDATE LOGIC (Category Only) ---
             if cat_id:
                 try:
                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
                     current_cat_ids = current_prod[0].get('public_categ_ids', [])
-                    
                     if cat_id not in current_cat_ids:
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
@@ -228,14 +223,9 @@ def process_product_data(data):
                 except Exception as e:
                     err_msg = str(e)
                     if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                        # Silently skip Odoo server internal crashes (POS related)
                         pass
                     else:
                         print(f"Webhook Update Error: {e}")
-        else:
-            # --- SKIP CREATION ---
-            pass
-
     return processed_count
 
 def process_order_data(data):
@@ -275,7 +265,6 @@ def process_order_data(data):
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
-            
             vals = {
                 'name': name, 'email': email, 'phone': cust_data.get('phone'),
                 'company_type': 'company', 'street': def_address.get('address1'),
@@ -305,21 +294,16 @@ def process_order_data(data):
         for item in data.get('line_items', []):
             sku = item.get('sku')
             if not sku: continue
-
             product_id = odoo.search_product_by_sku(sku, company_id)
             if not product_id:
                 archived_id = odoo.check_product_exists_by_sku(sku, company_id)
                 if archived_id:
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
-                
                 log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
                 try:
                     new_p_vals = {
-                        'name': item['name'],
-                        'default_code': sku,
-                        'list_price': float(item.get('price', 0)),
-                        'type': 'product'
+                        'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'
                     }
                     if company_id: new_p_vals['company_id'] = int(company_id)
                     odoo.create_product(new_p_vals)
@@ -336,28 +320,30 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC ---
-        # If order has shipping lines, create a service line in Odoo
+        # --- SHIPPING LOGIC (FIXED) ---
         for ship_line in data.get('shipping_lines', []):
-            cost = float(ship_line.get('price', 0.0))
-            if cost > 0:
-                ship_title = ship_line.get('title', 'Shipping')
-                # Try to find a generic shipping product or create one
+            try:
+                cost = float(ship_line.get('price', 0.0))
+            except: cost = 0.0
+            
+            ship_title = ship_line.get('title', 'Shipping')
+            
+            # Allow >= 0 to include Free Shipping
+            if cost >= 0:
                 ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
+                
                 if not ship_product_id:
-                    # Create service product for shipping
+                    log_event('Product', 'Info', "Creating 'Shopify Shipping' Service Product...")
                     try:
                         sp_vals = {
-                            'name': "Shopify Shipping",
-                            'type': 'service',
-                            'list_price': 0.0,
-                            'default_code': 'SHIP_FEE'
+                            'name': "Shopify Shipping", 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'
                         }
                         if company_id: sp_vals['company_id'] = int(company_id)
                         odoo.create_product(sp_vals)
                         ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
-                    except: pass
-                
+                    except Exception as e:
+                        log_event('Product', 'Error', f"Failed to create Shipping Product: {e}")
+
                 if ship_product_id:
                     lines.append((0, 0, {
                         'product_id': ship_product_id,
@@ -366,10 +352,12 @@ def process_order_data(data):
                         'name': ship_title,
                         'discount': 0.0
                     }))
+                else:
+                    log_event('Order', 'Warning', "Shipping line skipped: Could not find/create 'Shopify Shipping' product.")
 
         if not lines: return False, "No valid lines"
         
-        # --- PAYMENT METHOD LOGIC ---
+        # --- PAYMENT METHOD LOGIC (FIXED) ---
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
@@ -383,11 +371,11 @@ def process_order_data(data):
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
                 'partner_shipping_id': shipping_id,
-                'partner_invoice_id': invoice_id
+                'partner_invoice_id': invoice_id,
+                'note': note_text  # Update Note on edit
             }
             try:
                 odoo.update_sale_order(existing_order_id, update_vals)
-                # Post message for update context
                 odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
                 log_event('Order', 'Success', f"Updated {client_ref} (Revision)")
                 return True, "Updated"
@@ -404,7 +392,7 @@ def process_order_data(data):
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
-                'note': note_text  # Add Payment info to internal note
+                'note': note_text  # Set Note on create
             }
             if company_id: vals['company_id'] = int(company_id)
             try:
@@ -502,7 +490,6 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
-                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -557,9 +544,7 @@ def sync_products_master():
                 # Image Sync Logic with Isolation
                 try:
                     img_data = odoo.get_product_image(p['id'])
-                    # If image exists in Odoo AND Shopify has NO images
                     if img_data and not sp.images:
-                        # Decode bytes to string if needed
                         if isinstance(img_data, bytes):
                             img_data = img_data.decode('utf-8')
                             
@@ -568,7 +553,6 @@ def sync_products_master():
                         image.save()
                         log_event('Product Sync', 'Info', f"Synced Image for {sku}")
                 except Exception as img_e:
-                     # Log image error specifically, but don't fail the whole sync
                      log_event('Product Sync', 'Warning', f"Image Sync Failed for {sku}: {img_e}")
 
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
@@ -580,10 +564,9 @@ def sync_products_master():
                     metafield.save()
                 synced += 1
             except Exception as e:
-                # Catch general product sync failures caused by Odoo crash
                 err_msg = str(e)
                 if "pos.category" in err_msg or "CacheMiss" in err_msg:
-                    pass # Suppress Odoo POS crash errors to avoid confusion
+                    pass 
                 else:
                     log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
         
@@ -591,7 +574,6 @@ def sync_products_master():
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
 def sync_categories_only():
-    """Optimized ONE-TIME import of Categories from Shopify to Odoo."""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Category Sync Failed: Connection Error")
@@ -633,7 +615,7 @@ def sync_categories_only():
                 except Exception as e:
                     err_msg = str(e)
                     if "pos.category" in err_msg or "CacheMiss" in err_msg:
-                        pass # Ignore silent failures for corrupted items
+                        pass 
                     else:
                         print(f"Error syncing category for {sku}: {e}")
 
@@ -770,10 +752,45 @@ def trigger_duplicate_scan():
     return jsonify({"message": "Started"})
 
 @app.route('/sync/orders/manual', methods=['GET'])
-def manual_order_fetch(): return jsonify({"orders": []})
+def manual_order_fetch():
+    # UPDATED: Removing 'status=open' to fetch ALL recent orders (including archived/cancelled)
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?limit=10"
+    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+    try:
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code}"})
+        orders = res.json().get('orders', [])
+    except Exception as e:
+        return jsonify({"orders": [], "error": str(e)})
+    
+    mapped_orders = []
+    for o in orders:
+        status = "Not Synced"
+        try:
+            client_ref = f"ONLINE_{o['name']}"
+            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+            if exists: status = "Synced"
+        except: pass
+        if o.get('cancelled_at'): status = "Cancelled"
+        mapped_orders.append({
+            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status
+        })
+    return jsonify({"orders": mapped_orders})
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
-def import_selected_orders(): return jsonify({"message": "Done"})
+def import_selected_orders():
+    ids = request.json.get('order_ids', [])
+    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+    synced = 0
+    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
+    for oid in ids:
+        res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
+        if res.status_code == 200:
+            success, _ = process_order_data(res.json().get('order'))
+            if success: synced += 1
+    return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
