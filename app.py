@@ -229,7 +229,7 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. UPDATES existing orders instead of skipping."""
+    """Syncs order. UPDATES existing orders instead of skipping, preventing duplicates."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
@@ -554,6 +554,7 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
+                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -767,10 +768,6 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
-# --- START THE SCHEDULER (Outside main) ---
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
-
 @app.route('/')
 def dashboard():
     return render_template('dashboard.html', odoo_status=True if odoo else False, current_settings={}) 
@@ -926,6 +923,10 @@ def run_schedule():
         schedule.run_pending()
         time.sleep(1)
 
+# --- START SCHEDULER (Threaded, outside main so Gunicorn sees it) ---
+t = threading.Thread(target=run_schedule, daemon=True)
+t.start()
+
 if __name__ == '__main__':
-    # No start here to prevent duplicates locally
+    # Flask Dev Server
     app.run(debug=True)
