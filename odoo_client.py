@@ -160,6 +160,13 @@ class OdooClient:
             return data[0]['name']
         return None
 
+    def get_tag_names(self, tag_ids):
+        """Fetches the names of product tags."""
+        if not tag_ids: return []
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'product.tag', 'read', [tag_ids], {'fields': ['name']})
+        return [t['name'] for t in data]
+
     def get_product_image(self, product_id):
         """Fetches the base64 image_1920 for a specific product."""
         data = self.models.execute_kw(self.db, self.uid, self.password,
@@ -179,8 +186,8 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # Added 'qty_available' and 'public_categ_ids' to support new mappings
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids']
+        # Added 'qty_available', 'public_categ_ids', and 'product_tag_ids' to support new mappings
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
