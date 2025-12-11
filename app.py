@@ -187,6 +187,8 @@ def process_product_data(data):
     Handles Shopify Product Webhooks (Update Only).
     """
     product_type = data.get('product_type', '')
+    
+    # 1. Resolve Category ID (Shopify Type -> Odoo Public Category)
     cat_id = None
     if product_type:
         try:
@@ -200,6 +202,7 @@ def process_product_data(data):
         except Exception as e:
             print(f"Category Logic Error: {e}")
 
+    # 2. Iterate Variants
     variants = data.get('variants', [])
     processed_count = 0
     company_id = get_config('odoo_company_id')
@@ -207,6 +210,7 @@ def process_product_data(data):
     for v in variants:
         sku = v.get('sku')
         if not sku: continue
+        
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
@@ -216,6 +220,7 @@ def process_product_data(data):
                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
                     current_cat_ids = current_prod[0].get('public_categ_ids', [])
+                    
                     if cat_id not in current_cat_ids:
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
@@ -224,11 +229,13 @@ def process_product_data(data):
                 except Exception as e:
                     err_msg = str(e)
                     if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+                        # Silently skip Odoo server internal crashes (POS related)
                         pass
                     else:
                         print(f"Webhook Update Error: {e}")
         else:
-            pass # Skip creation from webhook
+            # --- SKIP CREATION ---
+            pass
 
     return processed_count
 
@@ -269,6 +276,7 @@ def process_order_data(data):
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
+            
             vals = {
                 'name': name, 'email': email, 'phone': cust_data.get('phone'),
                 'company_type': 'company', 'street': def_address.get('address1'),
@@ -298,16 +306,21 @@ def process_order_data(data):
         for item in data.get('line_items', []):
             sku = item.get('sku')
             if not sku: continue
+
             product_id = odoo.search_product_by_sku(sku, company_id)
             if not product_id:
                 archived_id = odoo.check_product_exists_by_sku(sku, company_id)
                 if archived_id:
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
+                
                 log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
                 try:
                     new_p_vals = {
-                        'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'
+                        'name': item['name'],
+                        'default_code': sku,
+                        'list_price': float(item.get('price', 0)),
+                        'type': 'product'
                     }
                     if company_id: new_p_vals['company_id'] = int(company_id)
                     odoo.create_product(new_p_vals)
@@ -331,12 +344,20 @@ def process_order_data(data):
             except: cost = 0.0
             
             ship_title = ship_line.get('title', 'Shipping')
+            
+            # Allow >= 0 to include Free Shipping
             if cost >= 0:
                 ship_product_id = None
+                
+                # 1. First Priority: Search by exact Shipping Method Name (e.g. "Free Mobil Nationwide Shipping")
                 if ship_title:
                     ship_product_id = odoo.search_product_by_name(ship_title, company_id)
+
+                # 2. Second Priority: Search by Generic SKU 'SHIP_FEE'
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
+                
+                # 3. Third Priority: Search by Generic Name
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
                 
@@ -351,10 +372,12 @@ def process_order_data(data):
                         }
                         if company_id: sp_vals['company_id'] = int(company_id)
                         odoo.create_product(sp_vals)
+                        # Re-fetch based on what we just created
                         if sp_vals.get('default_code'):
                              ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
                         else:
                              ship_product_id = odoo.search_product_by_name(sp_vals['name'], company_id)
+
                     except Exception as e:
                         log_event('Product', 'Error', f"Failed to create Shipping Product: {e}")
 
@@ -376,7 +399,7 @@ def process_order_data(data):
         note_text = f"Payment Gateway: {gateway}"
 
         if existing_order_id:
-            # --- SMART CHANGE DETECTION (NEW) ---
+            # --- SMART CHANGE DETECTION ---
             order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'note', 'order_line']})
             if not order_info:
                  return False, "Order not found in Odoo"
@@ -390,27 +413,33 @@ def process_order_data(data):
             
             # Change Detection Logic
             has_changes = False
+            
+            # 1. Check Note
             existing_note = current_order.get('note') or ''
             if note_text != existing_note:
                 has_changes = True
 
+            # 2. Check Lines
             if not has_changes:
                 current_line_ids = current_order.get('order_line', [])
                 if len(current_line_ids) != len(lines):
                     has_changes = True
                 elif current_line_ids:
+                    # Fetch detailed line info to compare
                     current_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                         'sale.order.line', 'read', [current_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit', 'discount']})
                     
+                    # Normalize Odoo Data
                     curr_set = []
                     for l in current_lines:
                         pid = l['product_id'][0] if isinstance(l['product_id'], (list, tuple)) else l['product_id']
                         curr_set.append((pid, float(l['product_uom_qty']), float(l['price_unit']), float(l['discount'])))
                     curr_set.sort()
 
+                    # Normalize Incoming Data
                     new_set = []
                     for l in lines:
-                        d = l[2] 
+                        d = l[2] # The data dict is the 3rd element in (0,0, {})
                         new_set.append((d['product_id'], float(d['product_uom_qty']), float(d['price_unit']), float(d['discount'])))
                     new_set.sort()
 
@@ -418,14 +447,17 @@ def process_order_data(data):
                          has_changes = True
                     else:
                         for c, n in zip(curr_set, new_set):
+                            # Compare ID, Qty, Price, Discount with tolerance
                             if c[0] != n[0] or abs(c[1]-n[1])>0.001 or abs(c[2]-n[2])>0.01 or abs(c[3]-n[3])>0.01:
                                 has_changes = True
                                 break
             
             if not has_changes:
+                # IMPORTANT: Skip update if nothing changed
                 log_event('Order', 'Info', f"Order {client_ref} is up to date. Skipped update.")
                 return True, "Up to Date"
 
+            # If changes detected, proceed with update
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
                 'partner_shipping_id': shipping_id,
@@ -525,7 +557,6 @@ def sync_products_master():
                 # Category Mapping
                 odoo_categ_ids = p.get('public_categ_ids', [])
                 if not odoo_categ_ids and sp.product_type:
-                    # Init logic (Shopify -> Odoo) always runs to fill gaps
                     try:
                         cat_name = sp.product_type
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
@@ -537,7 +568,7 @@ def sync_products_master():
                     except Exception as e:
                         err_msg = str(e)
                         if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                             pass
+                             pass # Suppress Odoo POS crash errors
                         else:
                              print(f"Category Import Error: {e}")
 
@@ -597,6 +628,7 @@ def sync_products_master():
                     variant.inventory_management = 'shopify'
                     variant_changed = True
                 
+                # Safely Check Product ID
                 v_product_id = getattr(variant, 'product_id', None)
                 if not v_product_id: 
                     if variant.attributes: v_product_id = variant.attributes.get('product_id')
@@ -613,7 +645,7 @@ def sync_products_master():
                          current_inv = get_shopify_variant_inv_by_sku(sku)
                          if current_inv and int(current_inv['qty']) != qty:
                              shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
-                             log_event('Product Sync', 'Info', f"Updated Stock for {sku}: {qty}")
+                             log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
                     except: pass
 
                 # Cost Price Sync
