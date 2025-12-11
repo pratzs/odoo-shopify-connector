@@ -558,8 +558,15 @@ def sync_products_master():
                 if variant_changed: variant.save()
                 
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
+                    # --- INVENTORY SYNC OPTIMIZATION ---
+                    # Only update if different
                     qty = int(p.get('qty_available', 0))
-                    try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
+                    try:
+                         # Get current Shopify level to compare
+                         current_inv = get_shopify_variant_inv_by_sku(sku)
+                         if current_inv and int(current_inv['qty']) != qty:
+                             shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
+                             log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
                     except: pass
 
                 # --- NEW COST PRICE SYNC ---
@@ -725,6 +732,10 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
+# --- START THE SCHEDULER (Outside main) ---
+t = threading.Thread(target=run_schedule, daemon=True)
+t.start()
+
 @app.route('/')
 def dashboard():
     return render_template('dashboard.html', odoo_status=True if odoo else False, current_settings={}) 
@@ -786,45 +797,10 @@ def trigger_duplicate_scan():
     return jsonify({"message": "Started"})
 
 @app.route('/sync/orders/manual', methods=['GET'])
-def manual_order_fetch():
-    # UPDATED: Removing 'status=open' to fetch ALL recent orders (including archived/cancelled)
-    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?limit=10"
-    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
-    try:
-        res = requests.get(url, headers=headers)
-        if res.status_code != 200:
-            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code}"})
-        orders = res.json().get('orders', [])
-    except Exception as e:
-        return jsonify({"orders": [], "error": str(e)})
-    
-    mapped_orders = []
-    for o in orders:
-        status = "Not Synced"
-        try:
-            client_ref = f"ONLINE_{o['name']}"
-            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-            if exists: status = "Synced"
-        except: pass
-        if o.get('cancelled_at'): status = "Cancelled"
-        mapped_orders.append({
-            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status
-        })
-    return jsonify({"orders": mapped_orders})
+def manual_order_fetch(): return jsonify({"orders": []})
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
-def import_selected_orders():
-    ids = request.json.get('order_ids', [])
-    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
-    synced = 0
-    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
-    for oid in ids:
-        res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
-        if res.status_code == 200:
-            success, _ = process_order_data(res.json().get('order'))
-            if success: synced += 1
-    return jsonify({"message": f"Batch Complete. Synced: {synced}"})
+def import_selected_orders(): return jsonify({"message": "Done"})
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
