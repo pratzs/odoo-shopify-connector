@@ -187,8 +187,6 @@ def process_product_data(data):
     Handles Shopify Product Webhooks (Update Only).
     """
     product_type = data.get('product_type', '')
-    
-    # 1. Resolve Category ID (Shopify Type -> Odoo Public Category)
     cat_id = None
     if product_type:
         try:
@@ -202,7 +200,6 @@ def process_product_data(data):
         except Exception as e:
             print(f"Category Logic Error: {e}")
 
-    # 2. Iterate Variants
     variants = data.get('variants', [])
     processed_count = 0
     company_id = get_config('odoo_company_id')
@@ -210,7 +207,6 @@ def process_product_data(data):
     for v in variants:
         sku = v.get('sku')
         if not sku: continue
-        
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
@@ -220,7 +216,6 @@ def process_product_data(data):
                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
                     current_cat_ids = current_prod[0].get('public_categ_ids', [])
-                    
                     if cat_id not in current_cat_ids:
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
@@ -240,10 +235,11 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. UPDATES existing orders instead of skipping."""
+    """Syncs order. UPDATES existing orders instead of skipping, preventing duplicates."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
+    # 1. CONCURRENCY CHECK
     with order_processing_lock:
         if shopify_id in active_processing_ids:
             log_event('Order', 'Skipped', f"Order {shopify_name} skipped (Concurrent process detected).")
@@ -276,7 +272,6 @@ def process_order_data(data):
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
-            
             vals = {
                 'name': name, 'email': email, 'phone': cust_data.get('phone'),
                 'company_type': 'company', 'street': def_address.get('address1'),
@@ -306,21 +301,16 @@ def process_order_data(data):
         for item in data.get('line_items', []):
             sku = item.get('sku')
             if not sku: continue
-
             product_id = odoo.search_product_by_sku(sku, company_id)
             if not product_id:
                 archived_id = odoo.check_product_exists_by_sku(sku, company_id)
                 if archived_id:
                     log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
                     continue 
-                
                 log_event('Product', 'Info', f"SKU {sku} missing on Order. Creating...")
                 try:
                     new_p_vals = {
-                        'name': item['name'],
-                        'default_code': sku,
-                        'list_price': float(item.get('price', 0)),
-                        'type': 'product'
+                        'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'
                     }
                     if company_id: new_p_vals['company_id'] = int(company_id)
                     odoo.create_product(new_p_vals)
@@ -337,7 +327,7 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC ---
+        # --- SHIPPING LOGIC (FIXED) ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
@@ -399,7 +389,7 @@ def process_order_data(data):
         note_text = f"Payment Gateway: {gateway}"
 
         if existing_order_id:
-            # --- SMART CHANGE DETECTION ---
+            # --- SMART CHANGE DETECTION (NEW) ---
             order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'note', 'order_line']})
             if not order_info:
                  return False, "Order not found in Odoo"
@@ -413,13 +403,10 @@ def process_order_data(data):
             
             # Change Detection Logic
             has_changes = False
-            
-            # 1. Check Note
             existing_note = current_order.get('note') or ''
             if note_text != existing_note:
                 has_changes = True
 
-            # 2. Check Lines
             if not has_changes:
                 current_line_ids = current_order.get('order_line', [])
                 if len(current_line_ids) != len(lines):
@@ -483,7 +470,7 @@ def process_order_data(data):
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
-                'note': note_text
+                'note': note_text  # Set Note on create
             }
             if company_id: vals['company_id'] = int(company_id)
             try:
@@ -578,7 +565,7 @@ def sync_products_master():
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
-                # Vendor Mapping
+                # Vendor Mapping (First word of Title)
                 if sync_vendor:
                     product_title = p.get('name', '')
                     target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
@@ -592,6 +579,7 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
+                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -640,6 +628,7 @@ def sync_products_master():
                 if variant_changed: variant.save()
                 
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
+                    # --- INVENTORY SYNC OPTIMIZATION ---
                     qty = int(p.get('qty_available', 0))
                     try:
                          current_inv = get_shopify_variant_inv_by_sku(sku)
@@ -648,7 +637,7 @@ def sync_products_master():
                              log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
                     except: pass
 
-                # Cost Price Sync
+                # --- NEW COST PRICE SYNC ---
                 if variant.inventory_item_id:
                     try:
                         cost = float(p.get('standard_price', 0.0))
@@ -656,9 +645,10 @@ def sync_products_master():
                         if float(inv_item.cost or 0) != cost:
                             inv_item.cost = cost
                             inv_item.save()
-                    except: pass
+                    except Exception as cost_e:
+                        print(f"Cost Sync Error {sku}: {cost_e}")
 
-                # Image Sync
+                # Image Sync Logic with Isolation
                 if get_config('prod_sync_images', False):
                     try:
                         img_data = odoo.get_product_image(p['id'])
