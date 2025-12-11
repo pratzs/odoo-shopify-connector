@@ -251,3 +251,32 @@ class OdooClient:
 
     def post_message(self, order_id, message):
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'message_post', [order_id], {'body': message})
+
+def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
+        domain = [
+            ['parent_id', '=', parent_id],
+            ['type', '=', type],
+            ['street', '=', address_data.get('street')],
+            ['active', '=', True]
+        ]
+        # Search for existing child address
+        existing_ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
+
+        if existing_ids:
+            return existing_ids[0]
+        
+        # Create new if not found
+        vals = {
+            'parent_id': parent_id,
+            'type': type,
+            'name': address_data.get('name') or "Delivery Address",
+            'street': address_data.get('street'),
+            'city': address_data.get('city'),
+            'zip': address_data.get('zip'),
+            'country_code': address_data.get('country_code'),
+            'phone': address_data.get('phone'),
+            'email': address_data.get('email')
+        }
+        
+        self._resolve_country(vals)
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
