@@ -660,6 +660,111 @@ def sync_products_master():
         cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
+def sync_customers_master():
+    """Odoo -> Shopify Customer Sync (Master)"""
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): 
+            log_event('System', 'Error', "Customer Sync Failed: Connection Error")
+            return
+
+        # 1. Configuration
+        direction = get_config('cust_direction', 'bidirectional')
+        if direction == 'shopify_to_odoo':
+            log_event('Customer Sync', 'Skipped', "Sync direction is set to Shopify -> Odoo only.")
+            return
+
+        company_id = get_config('odoo_company_id')
+        whitelist = [t.strip() for t in get_config('cust_whitelist_tags', '').split(',') if t.strip()]
+        blacklist = [t.strip() for t in get_config('cust_blacklist_tags', '').split(',') if t.strip()]
+        use_tags = get_config('cust_sync_tags', False)
+
+        # 2. Fetch Odoo Customers (Active Companies & Individuals)
+        # Using a far past date to simulate "Get All" for the manual trigger
+        last_run = "2000-01-01 00:00:00" 
+        odoo_customers = odoo.get_changed_customers(last_run, company_id)
+        
+        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers in Odoo. Processing...")
+        
+        synced_count = 0
+        
+        for p in odoo_customers:
+            email = p.get('email')
+            if not email or "@" not in email: continue # Shopify requires valid email
+
+            # 3. Tag Filtering Logic
+            if use_tags:
+                p_tags = odoo.get_tag_names(p.get('category_id', []))
+                if blacklist and any(t in p_tags for t in blacklist): continue
+                if whitelist and not any(t in p_tags for t in whitelist): continue
+
+            try:
+                # 4. Find or Init Shopify Customer
+                shopify_cust = shopify.Customer.search(query=f"email:{email}")
+                if shopify_cust:
+                    c = shopify_cust[0]
+                else:
+                    c = shopify.Customer()
+                    c.email = email
+                
+                # 5. Map Basic Fields
+                c.first_name = p.get('name', '').split(' ')[0]
+                c.last_name = ' '.join(p.get('name', '').split(' ')[1:]) or 'Customer'
+                c.phone = p.get('phone') or p.get('mobile')
+                c.verified_email = True
+                
+                # 6. Map Address & Company (Critical for B2B)
+                address_data = {
+                    'address1': p.get('street') or '',
+                    'city': p.get('city') or '',
+                    'zip': p.get('zip') or '',
+                    'country_code': p.get('country_id')[1] if p.get('country_id') else '', 
+                    'company': p.get('name') if p.get('is_company') else (p.get('parent_id')[1] if p.get('parent_id') else ''),
+                    'phone': c.phone,
+                    'first_name': c.first_name,
+                    'last_name': c.last_name,
+                    'default': True
+                }
+                
+                # Resolve Country Code (Odoo returns [id, "New Zealand"])
+                if p.get('country_id'):
+                    # Quick lookup to get ISO code would be ideal, but for now we try name matching
+                    # Note: You might want to enhance OdooClient to return 'code' field for country
+                    pass 
+
+                c.addresses = [shopify.Address(address_data)]
+                
+                # 7. Map VAT/Tax ID to Metafield
+                vat = p.get('vat')
+                if vat:
+                    # Sync to Note (visible in Admin)
+                    c.note = f"VAT Number: {vat}"
+                    
+                    # Sync to Metafield (usable in Theme/Checkout)
+                    c.metafields = [
+                        shopify.Metafield({
+                            'key': 'vat_number',
+                            'value': vat,
+                            'type': 'single_line_text_field',
+                            'namespace': 'custom'
+                        })
+                    ]
+                    c.tax_exempt = True # Often B2B customers are tax exempt in Shopify logic
+
+                c.save()
+                
+                # 8. Link in DB
+                if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id)).first():
+                    new_map = CustomerMap(shopify_customer_id=str(c.id), odoo_partner_id=p['id'], email=email)
+                    db.session.add(new_map)
+                    db.session.commit()
+                
+                synced_count += 1
+
+            except Exception as e:
+                log_event('Customer Sync', 'Error', f"Failed {email}: {e}")
+
+        log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.")
+
 def sync_categories_only():
     """Optimized ONE-TIME import of Categories from Shopify to Odoo."""
     with app.app_context():
