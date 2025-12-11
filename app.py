@@ -233,7 +233,7 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. UPDATES existing orders instead of skipping."""
+    """Syncs order. Forces B2B Structure: Main Partner is ALWAYS a Company. Invoice/Delivery are Child Contacts."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
@@ -248,6 +248,7 @@ def process_order_data(data):
         client_ref = f"ONLINE_{shopify_name}"
         company_id = get_config('odoo_company_id')
         
+        # Resolve Company Context
         if not company_id and odoo:
             try:
                 user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
@@ -255,6 +256,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
+        # Check for Existing Order
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -263,22 +265,48 @@ def process_order_data(data):
                 existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
+        # --- PARTNER LOGIC START ---
         partner = odoo.search_partner_by_email(email)
         
+        # A) Create Main Partner (Force Company)
         if not partner:
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
-            name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip() or def_address.get('name') or email
+            
+            # Name Logic: Use Company Name if available, otherwise Person Name
+            # (But effectively treat Person Name as a "Company" name in Odoo)
+            company_name = def_address.get('company')
+            person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
+            final_name = company_name if company_name else (person_name or email)
+
+            # VAT Extraction
+            vat_number = None
+            for attr in data.get('note_attributes', []):
+                if attr.get('name', '').lower() in ['vat', 'vat_number', 'tax_id']:
+                    vat_number = attr.get('value')
+
             vals = {
-                'name': name, 'email': email, 'phone': cust_data.get('phone'),
-                'company_type': 'company', 'street': def_address.get('address1'),
-                'city': def_address.get('city'), 'zip': def_address.get('zip'), 'country_code': def_address.get('country_code')
+                'name': final_name,
+                'email': email,
+                'phone': cust_data.get('phone'),
+                'street': def_address.get('address1'),
+                'city': def_address.get('city'),
+                'zip': def_address.get('zip'),
+                'country_code': def_address.get('country_code'),
+                'vat': vat_number,
+                
+                # CRITICAL: Force Company Type
+                'is_company': True,
+                'company_type': 'company'
             }
             if company_id: vals['company_id'] = int(company_id)
+            
             try:
                 partner_id = odoo.create_partner(vals)
-                partner = {'id': partner_id, 'name': name, 'parent_id': False}
-                log_event('Customer', 'Success', f"Created Customer: {name}")
+                partner = {'id': partner_id, 'name': final_name}
+                log_event('Customer', 'Success', f"Created Company Partner: {final_name}")
+                
+                # Link Map
                 if shopify_id:
                     c_id = str(data.get('customer', {}).get('id'))
                     if c_id:
@@ -286,14 +314,54 @@ def process_order_data(data):
                         db.session.add(cust_map)
                         db.session.commit()
             except Exception as e:
-                return False, f"Customer Error: {e}"
+                return False, f"Customer Creation Error: {e}"
         
+        # Ensure we have the Main Company ID (if search found a child contact, resolve to parent)
         partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+
+        # B) Handle Child Addresses (Invoice & Delivery)
+        # We always check/create these to ensure the order has distinct addresses linked
+        bill_addr = data.get('billing_address') or {}
+        ship_addr = data.get('shipping_address') or {}
+        
+        # Helper to map Shopify address to Odoo Child Data
+        def prep_child_addr(addr_data, label):
+            display_name = addr_data.get('name') or partner['name']
+            # If the name is just the company name, append the label to distinguish contacts
+            # e.g. "Worthy Products (Invoice)"
+            if display_name == partner['name']:
+                display_name = f"{display_name} ({label})"
+            
+            return {
+                'name': display_name,
+                'street': addr_data.get('address1'),
+                'city': addr_data.get('city'),
+                'zip': addr_data.get('zip'),
+                'country_code': addr_data.get('country_code'),
+                'phone': addr_data.get('phone'),
+                'email': email # Inherit email from main
+            }
+
+        # Resolve Invoice Contact
+        if bill_addr:
+            inv_data = prep_child_addr(bill_addr, "Invoice")
+            invoice_id = odoo.find_or_create_child_address(partner_id, inv_data, type='invoice')
+        else:
+            invoice_id = partner_id # Fallback to main
+
+        # Resolve Delivery Contact
+        if ship_addr:
+            ship_data = prep_child_addr(ship_addr, "Delivery")
+            shipping_id = odoo.find_or_create_child_address(partner_id, ship_data, type='delivery')
+        else:
+            shipping_id = partner_id # Fallback to main
+        
+        # Sales Rep Resolution
         sales_rep_id = odoo.get_partner_salesperson(partner_id)
         if not sales_rep_id: sales_rep_id = odoo.uid
-        shipping_id = partner_id 
-        invoice_id = partner_id 
+        # --- PARTNER LOGIC END ---
 
+        # --- LINE ITEMS ---
         lines = []
         for item in data.get('line_items', []):
             sku = item.get('sku')
@@ -324,7 +392,7 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC ---
+        # --- SHIPPING LINES ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
@@ -371,28 +439,25 @@ def process_order_data(data):
 
         if not lines: return False, "No valid lines"
         
-        # --- PAYMENT METHOD LOGIC ---
+        # --- PAYMENT METHOD & NOTES ---
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
         if existing_order_id:
-            # --- SMART CHANGE DETECTION (NEW) ---
+            # --- UPDATE PATH ---
             order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'note', 'order_line']})
-            if not order_info:
-                 return False, "Order not found in Odoo"
-                 
+            if not order_info: return False, "Order not found in Odoo"
+            
             current_order = order_info[0]
             state = current_order['state']
-            
             if state in ['done', 'cancel']:
                 log_event('Order', 'Skipped', f"Order {client_ref} is {state}. Update skipped.")
                 return True, "Skipped"
             
-            # Change Detection Logic
+            # Change Detection
             has_changes = False
             existing_note = current_order.get('note') or ''
-            if note_text != existing_note:
-                has_changes = True
+            if note_text != existing_note: has_changes = True
 
             if not has_changes:
                 current_line_ids = current_order.get('order_line', [])
@@ -413,9 +478,9 @@ def process_order_data(data):
                         d = l[2] 
                         new_set.append((d['product_id'], float(d['product_uom_qty']), float(d['price_unit']), float(d['discount'])))
                     new_set.sort()
-
-                    if len(curr_set) != len(new_set):
-                         has_changes = True
+                    
+                    # Fuzzy float comparison
+                    if len(curr_set) != len(new_set): has_changes = True
                     else:
                         for c, n in zip(curr_set, new_set):
                             if c[0] != n[0] or abs(c[1]-n[1])>0.001 or abs(c[2]-n[2])>0.01 or abs(c[3]-n[3])>0.01:
@@ -428,8 +493,8 @@ def process_order_data(data):
 
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
-                'partner_shipping_id': shipping_id,
-                'partner_invoice_id': invoice_id,
+                'partner_shipping_id': shipping_id, # Updated to use Delivery Contact
+                'partner_invoice_id': invoice_id,   # Updated to use Invoice Contact
                 'note': note_text 
             }
             try:
@@ -445,9 +510,9 @@ def process_order_data(data):
             vals = {
                 'name': client_ref, 
                 'client_order_ref': client_ref, 
-                'partner_id': partner_id, 
-                'partner_invoice_id': invoice_id, 
-                'partner_shipping_id': shipping_id, 
+                'partner_id': partner_id,           # Main Company
+                'partner_invoice_id': invoice_id,   # Child Contact
+                'partner_shipping_id': shipping_id, # Child Contact
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
