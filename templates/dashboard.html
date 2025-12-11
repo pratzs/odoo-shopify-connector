@@ -19,8 +19,8 @@
             border-bottom-right-radius: 0.375rem;
             overflow: hidden;
         }
-        .mapping-box { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 15px; }
-        .location-tag { background: #e9ecef; border: 1px solid #ced4da; border-radius: 4px; padding: 2px 8px; margin: 2px; display: inline-block; font-size: 0.85em; }
+        .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;}
+        .form-label-sm { font-size: 0.85rem; font-weight: 600; color: #6c757d; }
     </style>
 </head>
 <body>
@@ -51,34 +51,14 @@
                         <h5 class="mb-0"><i class="bi bi-sliders"></i> Manual Actions</h5>
                     </div>
                     <div class="mt-3 d-flex gap-2 flex-wrap">
-                        <!-- Order Actions -->
-                        <button onclick="openOrderImportModal()" class="btn btn-primary">
-                            <i class="bi bi-cloud-download"></i> Fetch Recent Shopify Orders
-                        </button>
-                        
-                        <!-- Inventory Actions -->
-                        <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary">
-                            <i class="bi bi-box-seam"></i> Force Inventory Sync
-                        </button>
-                        
-                        <!-- Product Actions -->
-                        <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark">
-                            <i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)
-                        </button>
-                        
-                        <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger">
-                            <i class="bi bi-trash"></i> Archive Duplicate SKUs
-                        </button>
-
-                        <!-- Customer Actions -->
-                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success">
-                            <i class="bi bi-people"></i> Force Customer Sync
-                        </button>
-
-                        <!-- System Actions -->
-                        <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info">
-                            <i class="bi bi-lightning"></i> Test Connection
-                        </button>
+                        <button onclick="openOrderImportModal()" class="btn btn-primary"><i class="bi bi-cloud-download"></i> Fetch Recent Shopify Orders</button>
+                        <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary"><i class="bi bi-box-seam"></i> Force Inventory Sync</button>
+                        <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark"><i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)</button>
+                        <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger"><i class="bi bi-trash"></i> Archive Duplicate SKUs</button>
+                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success"><i class="bi bi-people"></i> Force Customer Sync</button>
+                        <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info"><i class="bi bi-lightning"></i> Test Connection</button>
+                         <!-- NEW: Category Init Button -->
+                        <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-info text-white"><i class="bi bi-tags"></i> Init Category Sync</button>
                     </div>
                 </div>
             </div>
@@ -89,14 +69,10 @@
             <div class="card-header bg-white">
                 <ul class="nav nav-tabs card-header-tabs" id="mainTabs" role="tablist">
                     <li class="nav-item">
-                        <a class="nav-link active" data-bs-toggle="tab" href="#live-logs">
-                            <i class="bi bi-activity"></i> Live Logs
-                        </a>
+                        <a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Live Logs</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" data-bs-toggle="tab" href="#settings">
-                            <i class="bi bi-gear"></i> Configuration
-                        </a>
+                        <a class="nav-link" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Configuration</a>
                     </li>
                 </ul>
             </div>
@@ -106,111 +82,173 @@
                     <!-- NEW LIVE LOGS TAB -->
                     <div class="tab-pane fade show active" id="live-logs">
                         <div class="log-frame-container">
-                            <!-- This iframe loads the React app safely inside your dashboard -->
-                            <iframe 
-                                src="/live_logs" 
-                                width="100%" 
-                                height="100%" 
-                                frameborder="0" 
-                                style="border: none; display: block;">
-                            </iframe>
+                            <iframe src="/live_logs" width="100%" height="100%" frameborder="0" style="border: none; display: block;"></iframe>
                         </div>
                     </div>
                     
-                    <!-- SETTINGS TAB (Preserved exactly as is) -->
+                    <!-- SETTINGS TAB (Redesigned) -->
                     <div class="tab-pane fade p-4" id="settings">
                         
-                        <!-- Company Selection -->
-                        <div class="mb-4">
-                            <label class="form-label fw-bold">1. Select Odoo Company</label>
-                            <select class="form-select" id="companySelect">
-                                <option value="" selected>Loading Companies...</option>
-                            </select>
-                            <div class="form-text">Inventory locations will be filtered based on this company.</div>
-                        </div>
-
-                        <!-- Quantity & Sync Rules -->
-                        <div class="card mb-4 bg-light border-0">
+                        <!-- Global Odoo Settings -->
+                        <div class="card mb-4">
                             <div class="card-body">
-                                <h6 class="card-title fw-bold mb-3">Inventory Rules</h6>
-                                <div class="row g-3">
-                                    <div class="col-md-6">
-                                        <label class="form-label">Quantity Type</label>
-                                        <select class="form-select" id="invType">
-                                            <option value="qty_available" {% if current_settings.field == 'qty_available' %}selected{% endif %}>Quantity On Hand (Physical)</option>
-                                            <option value="virtual_available" {% if current_settings.field == 'virtual_available' %}selected{% endif %}>Quantity Available (Forecasted)</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label">Auto-Sync Frequency</label>
-                                        <select class="form-select" id="syncFreq" disabled>
-                                            <option selected>Every 30 Minutes</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="mt-3">
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
-                                        <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
-                                    </div>
-                                    <div class="form-check mt-2">
-                                        <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
-                                        <label class="form-check-label" for="checkCommitted">Combine Odoo available + Shopify committed</label>
-                                    </div>
-                                </div>
-                                <div class="mt-3" id="locationList">
-                                    <!-- Locations loaded via JS -->
+                                <div class="section-header"><i class="bi bi-building"></i> General Connection</div>
+                                <div class="mb-3">
+                                    <label class="form-label-sm">Odoo Company Context</label>
+                                    <select class="form-select" id="companySelect">
+                                        <option value="" selected>Loading Companies...</option>
+                                    </select>
+                                    <div class="form-text">All sync operations will run in the context of this company.</div>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Customer Sync Settings -->
-                        <div class="mb-4">
-                            <label class="form-label fw-bold">4. Customer Sync Settings</label>
-                            <div class="card bg-light border-0">
-                                <div class="card-body">
-                                    <div class="mb-3">
-                                        <label class="form-label small fw-bold">Customer Sync Direction</label>
-                                        <select class="form-select" id="custSyncDirection">
-                                            <option value="bidirectional" {% if current_settings.cust_direction == 'bidirectional' %}selected{% endif %}>Bidirectional (Odoo Master)</option>
-                                            <option value="odoo_to_shopify" {% if current_settings.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
-                                            <option value="shopify_to_odoo" {% if current_settings.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
-                                        </select>
-                                    </div>
+                        <div class="row">
+                            <!-- Product Settings -->
+                            <div class="col-md-6">
+                                <div class="card mb-4 h-100">
+                                    <div class="card-body">
+                                        <div class="section-header"><i class="bi bi-box"></i> Product Settings</div>
+                                        
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="prodAutoCreate" {% if current_settings.prod_auto_create %}checked{% endif %}>
+                                            <label class="form-check-label" for="prodAutoCreate">Create new and update existing products</label>
+                                        </div>
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="prodAutoPublish" {% if current_settings.prod_auto_publish %}checked{% endif %}>
+                                            <label class="form-check-label" for="prodAutoPublish">Auto-publish newly synced products</label>
+                                        </div>
+                                         <div class="form-check form-switch mb-3">
+                                            <input class="form-check-input" type="checkbox" id="prodSyncImages" {% if current_settings.prod_sync_images %}checked{% endif %}>
+                                            <label class="form-check-label" for="prodSyncImages">Sync Images (Odoo Master)</label>
+                                        </div>
 
-                                    <div class="form-check form-switch mb-2">
-                                        <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
-                                        <label class="form-check-label fw-bold" for="custAutoSync">Enable Auto Customer Sync (Daily)</label>
+                                        <hr>
+                                        <label class="form-label-sm">Select Fields to Update from Odoo</label>
+                                        <div class="d-flex flex-wrap gap-3 mb-3">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldPrice" checked disabled> <label class="form-check-label">Price</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldTitle" checked disabled> <label class="form-check-label">Title</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="fieldDesc" checked disabled> <label class="form-check-label">Description</label>
+                                            </div>
+                                        </div>
                                     </div>
-                                    
-                                    <!-- Sync Tags Switch -->
-                                    <div class="form-check form-switch mt-3">
-                                        <input class="form-check-input" type="checkbox" id="custSyncTagsSwitch" {% if current_settings.cust_sync_tags %}checked{% endif %} onchange="toggleTagFields()">
-                                        <label class="form-check-label fw-bold" for="custSyncTagsSwitch">Enable Tag Filtering</label>
-                                    </div>
+                                </div>
+                            </div>
 
-                                    <!-- Tag Filtering Fields (Controlled by toggleTagFields JS) -->
-                                    <div id="tagFilterFields" class="mt-3 p-3 border rounded" style="{% if not current_settings.cust_sync_tags %}display: none;{% endif %}">
+                            <!-- Inventory Settings -->
+                            <div class="col-md-6">
+                                <div class="card mb-4 h-100">
+                                    <div class="card-body">
+                                        <div class="section-header"><i class="bi bi-boxes"></i> Inventory Settings</div>
                                         
                                         <div class="mb-3">
-                                            <label class="form-label small fw-bold" for="custWhitelistTags">Tags to Import (Whitelist)</label>
-                                            <textarea class="form-control" id="custWhitelistTags" rows="2" placeholder="tag1, tag2, tag3">{% if current_settings.cust_whitelist_tags %}{{ current_settings.cust_whitelist_tags }}{% endif %}</textarea>
-                                            <div class="form-text">If specified, ONLY sync customers possessing AT LEAST ONE of these tags.</div>
+                                            <label class="form-label-sm">Quantity Type</label>
+                                            <select class="form-select" id="invType">
+                                                <option value="qty_available" {% if current_settings.field == 'qty_available' %}selected{% endif %}>Quantity On Hand (Physical)</option>
+                                                <option value="virtual_available" {% if current_settings.field == 'virtual_available' %}selected{% endif %}>Quantity Available (Forecasted)</option>
+                                            </select>
                                         </div>
 
-                                        <div class="mb-3">
-                                            <label class="form-label small fw-bold" for="custBlacklistTags">Tags to Exclude (Blacklist)</label>
-                                            <textarea class="form-control" id="custBlacklistTags" rows="2" placeholder="tagA, tagB, tagC">{% if current_settings.cust_blacklist_tags %}{{ current_settings.cust_blacklist_tags }}{% endif %}</textarea>
-                                            <div class="form-text">If specified, SKIP customers possessing AT LEAST ONE of these tags.</div>
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
+                                            <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
+                                        </div>
+                                        <div class="form-check form-switch mb-3">
+                                            <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
+                                            <label class="form-check-label" for="checkCommitted">Combine Odoo available + Shopify committed</label>
+                                        </div>
+                                        
+                                        <div class="border rounded p-2 bg-light">
+                                            <label class="form-label-sm mb-2">Inventory Locations Mapping</label>
+                                            <div id="locationList" class="small">Loading...</div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        <div class="d-grid gap-2 d-md-flex justify-content-md-end">
-                            <button onclick="saveSettings()" class="btn btn-success btn-lg px-5">
-                                <i class="bi bi-save"></i> Save Configuration
+                        <div class="row">
+                             <!-- Order Settings -->
+                            <div class="col-md-6">
+                                <div class="card mb-4 h-100">
+                                    <div class="card-body">
+                                        <div class="section-header"><i class="bi bi-cart"></i> Order Settings</div>
+                                        
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="orderEnableSync" checked disabled>
+                                            <label class="form-check-label">Enable Order Sync (Always On)</label>
+                                        </div>
+                                        
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="orderSyncTax" {% if current_settings.order_sync_tax %}checked{% endif %}>
+                                            <label class="form-check-label" for="orderSyncTax">Sync Tax-Included Price</label>
+                                        </div>
+
+                                        <div class="form-check form-switch mb-3">
+                                            <input class="form-check-input" type="checkbox" id="orderSyncPayment" checked disabled>
+                                            <label class="form-check-label">Sync Payment Method (as Note)</label>
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <label class="form-label-sm">Default Discount Product</label>
+                                            <input type="text" class="form-control form-control-sm" value="DISC-001" readonly title="Handled automatically">
+                                        </div>
+                                         <div class="mb-3">
+                                            <label class="form-label-sm">Default Shipping Product</label>
+                                            <input type="text" class="form-control form-control-sm" value="SHIP-001 / SHIP_FEE" readonly title="Handled automatically">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                             <!-- Customer Settings -->
+                            <div class="col-md-6">
+                                <div class="card mb-4 h-100">
+                                    <div class="card-body">
+                                        <div class="section-header"><i class="bi bi-people"></i> Customer Settings</div>
+                                         <div class="mb-3">
+                                            <label class="form-label-sm">Sync Direction</label>
+                                            <select class="form-select" id="custSyncDirection">
+                                                <option value="bidirectional" {% if current_settings.cust_direction == 'bidirectional' %}selected{% endif %}>Bidirectional (Odoo Master)</option>
+                                                <option value="odoo_to_shopify" {% if current_settings.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
+                                                <option value="shopify_to_odoo" {% if current_settings.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
+                                            <label class="form-check-label" for="custAutoSync">Enable Auto Customer Sync (Daily)</label>
+                                        </div>
+                                        
+                                        <div class="form-check form-switch mt-3">
+                                            <input class="form-check-input" type="checkbox" id="custSyncTagsSwitch" {% if current_settings.cust_sync_tags %}checked{% endif %} onchange="toggleTagFields()">
+                                            <label class="form-check-label" for="custSyncTagsSwitch">Enable Tag Filtering</label>
+                                        </div>
+
+                                        <div id="tagFilterFields" class="mt-2 p-2 border rounded bg-light" style="{% if not current_settings.cust_sync_tags %}display: none;{% endif %}">
+                                            <div class="mb-2">
+                                                <label class="form-label-sm">Whitelist Tags</label>
+                                                <input type="text" class="form-control form-control-sm" id="custWhitelistTags" placeholder="tag1, tag2" value="{% if current_settings.cust_whitelist_tags %}{{ current_settings.cust_whitelist_tags }}{% endif %}">
+                                            </div>
+                                            <div>
+                                                <label class="form-label-sm">Blacklist Tags</label>
+                                                <input type="text" class="form-control form-control-sm" id="custBlacklistTags" placeholder="tagA, tagB" value="{% if current_settings.cust_blacklist_tags %}{{ current_settings.cust_blacklist_tags }}{% endif %}">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Save Action -->
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-3 sticky-bottom bg-white py-3 border-top">
+                            <button onclick="saveSettings()" class="btn btn-success btn-lg px-5 shadow">
+                                <i class="bi bi-save"></i> Save All Configurations
                             </button>
                         </div>
 
@@ -274,9 +312,7 @@
         function formatLocalTime(utcString) {
             if (!utcString) return '';
             try {
-                // Get user's timezone from browser
                 const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                
                 return new Date(utcString).toLocaleString(undefined, {
                     timeZone: userTimezone,
                     year: 'numeric', month: '2-digit', day: '2-digit',
@@ -291,7 +327,6 @@
                 const utc = el.getAttribute('data-utc');
                 if(utc) el.innerText = formatLocalTime(utc);
             });
-            // Initial call to hide/show tag fields based on saved setting
             toggleTagFields();
         });
 
@@ -319,8 +354,6 @@
                         const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
                         sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
                     });
-                    
-                    // Automatically load locations if company was already saved
                     if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
                 });
         }
@@ -347,7 +380,7 @@
                         return `
                             <div class="form-check">
                                 <input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}>
-                                <label class="form-check-label" for="loc_${loc.id}">${displayName}</label>
+                                <label class="form-check-label small" for="loc_${loc.id}">${displayName}</label>
                             </div>`;
                     });
                     list.innerHTML = items.join('');
@@ -356,38 +389,36 @@
 
         function saveSettings() {
             const companyId = document.getElementById('companySelect').value;
-            const field = document.querySelector('#invType').value;
-            const syncZero = document.getElementById('checkZeroStock').checked;
-            const combineCommitted = document.getElementById('checkCommitted').checked;
-            const locations = Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value));
-            
-            // Customer Settings
-            const custDirection = document.getElementById('custSyncDirection').value;
-            const custAutoSync = document.getElementById('custAutoSync').checked;
-            const custSyncTagsSwitch = document.getElementById('custSyncTagsSwitch').checked;
-            
-            let whitelistTags = "";
-            let blacklistTags = "";
-
-            if (custSyncTagsSwitch) {
-                whitelistTags = document.getElementById('custWhitelistTags').value;
-                blacklistTags = document.getElementById('custBlacklistTags').value;
-            }
-
             if (!companyId) { alert("Please select a Company first."); return; }
+
+            const payload = {
+                company_id: companyId,
+                // Inventory
+                field: document.querySelector('#invType').value,
+                sync_zero: document.getElementById('checkZeroStock').checked,
+                combine_committed: document.getElementById('checkCommitted').checked,
+                locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
+                
+                // Products
+                prod_auto_create: document.getElementById('prodAutoCreate').checked,
+                prod_auto_publish: document.getElementById('prodAutoPublish').checked,
+                prod_sync_images: document.getElementById('prodSyncImages').checked,
+
+                // Orders
+                order_sync_tax: document.getElementById('orderSyncTax').checked,
+
+                // Customers
+                cust_direction: document.getElementById('custSyncDirection').value,
+                cust_auto_sync: document.getElementById('custAutoSync').checked,
+                cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
+                cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
+                cust_blacklist_tags: document.getElementById('custBlacklistTags').value
+            };
 
             fetch('/api/settings/save', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ 
-                    company_id: companyId, 
-                    field, locations, sync_zero: syncZero, combine_committed: combineCommitted,
-                    cust_direction: custDirection, 
-                    cust_auto_sync: custAutoSync, 
-                    cust_sync_tags: custSyncTagsSwitch, // Use the switch state
-                    cust_whitelist_tags: whitelistTags,
-                    cust_blacklist_tags: blacklistTags
-                })
+                body: JSON.stringify(payload)
             })
             .then(r => r.json())
             .then(data => showToast("Configuration Saved!"))
@@ -415,8 +446,6 @@
                  showToast("Please select at least one order to import.");
                  return;
             }
-            
-            // Show a progress message while fetching and queuing the sync
             document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Importing...</td></tr>';
 
             fetch('/sync/orders/import_batch', {
@@ -428,13 +457,11 @@
             .then(data => { 
                 modal.hide(); 
                 showToast(data.message); 
-                // Delay reload slightly to allow background thread to start logging
                 setTimeout(() => location.reload(), 2000); 
             })
             .catch(error => {
                 modal.hide(); 
                 showToast("Import failed due to a network error.");
-                console.error("Import Batch Error:", error);
                 setTimeout(() => location.reload(), 2000); 
             });
         }
