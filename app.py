@@ -224,13 +224,11 @@ def process_product_data(data):
                 except Exception as e:
                     err_msg = str(e)
                     if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                        # Silently skip Odoo server internal crashes
                         pass
                     else:
                         print(f"Webhook Update Error: {e}")
         else:
-            # --- SKIP CREATION ---
-            pass
+            pass # Skip creation from webhook
 
     return processed_count
 
@@ -326,7 +324,7 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC (FIXED) ---
+        # --- SHIPPING LOGIC ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
@@ -392,33 +390,27 @@ def process_order_data(data):
             
             # Change Detection Logic
             has_changes = False
-            
-            # 1. Check Note
             existing_note = current_order.get('note') or ''
             if note_text != existing_note:
                 has_changes = True
 
-            # 2. Check Lines
             if not has_changes:
                 current_line_ids = current_order.get('order_line', [])
                 if len(current_line_ids) != len(lines):
                     has_changes = True
                 elif current_line_ids:
-                    # Fetch detailed line info to compare
                     current_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                         'sale.order.line', 'read', [current_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit', 'discount']})
                     
-                    # Normalize Odoo Data
                     curr_set = []
                     for l in current_lines:
                         pid = l['product_id'][0] if isinstance(l['product_id'], (list, tuple)) else l['product_id']
                         curr_set.append((pid, float(l['product_uom_qty']), float(l['price_unit']), float(l['discount'])))
                     curr_set.sort()
 
-                    # Normalize Incoming Data
                     new_set = []
                     for l in lines:
-                        d = l[2] # The data dict is the 3rd element in (0,0, {})
+                        d = l[2] 
                         new_set.append((d['product_id'], float(d['product_uom_qty']), float(d['price_unit']), float(d['discount'])))
                     new_set.sort()
 
@@ -426,17 +418,14 @@ def process_order_data(data):
                          has_changes = True
                     else:
                         for c, n in zip(curr_set, new_set):
-                            # Compare ID, Qty, Price, Discount with tolerance
                             if c[0] != n[0] or abs(c[1]-n[1])>0.001 or abs(c[2]-n[2])>0.01 or abs(c[3]-n[3])>0.01:
                                 has_changes = True
                                 break
             
             if not has_changes:
-                # IMPORTANT: Skip update if nothing changed
                 log_event('Order', 'Info', f"Order {client_ref} is up to date. Skipped update.")
                 return True, "Up to Date"
 
-            # If changes detected, proceed with update
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
                 'partner_shipping_id': shipping_id,
@@ -488,6 +477,13 @@ def sync_products_master():
         odoo_products = odoo.get_all_products(company_id)
         active_odoo_skus = set()
         
+        # Load Field Configs
+        sync_title = get_config('prod_sync_title', True)
+        sync_desc = get_config('prod_sync_desc', True)
+        sync_price = get_config('prod_sync_price', True)
+        sync_type = get_config('prod_sync_type', True)
+        sync_vendor = get_config('prod_sync_vendor', True)
+        
         log_event('Product Sync', 'Info', f"Found {len(odoo_products)} products. Starting Master Sync...")
         
         synced = 0
@@ -514,18 +510,22 @@ def sync_products_master():
                 else: sp = shopify.Product()
                 product_changed = False
                 
-                if sp.title != p['name']:
+                # Title
+                if sync_title and sp.title != p['name']:
                     sp.title = p['name']
                     product_changed = True
                 
-                odoo_desc = p.get('description_sale') or ''
-                if (sp.body_html or '') != odoo_desc:
-                    sp.body_html = odoo_desc
-                    product_changed = True
+                # Description
+                if sync_desc:
+                    odoo_desc = p.get('description_sale') or ''
+                    if (sp.body_html or '') != odoo_desc:
+                        sp.body_html = odoo_desc
+                        product_changed = True
                 
                 # Category Mapping
                 odoo_categ_ids = p.get('public_categ_ids', [])
                 if not odoo_categ_ids and sp.product_type:
+                    # Init logic (Shopify -> Odoo) always runs to fill gaps
                     try:
                         cat_name = sp.product_type
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
@@ -537,22 +537,23 @@ def sync_products_master():
                     except Exception as e:
                         err_msg = str(e)
                         if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                             pass # Suppress Odoo POS crash errors
+                             pass
                         else:
                              print(f"Category Import Error: {e}")
 
-                elif odoo_categ_ids:
+                elif odoo_categ_ids and sync_type:
                     odoo_cat_name = odoo.get_public_category_name(odoo_categ_ids)
                     if odoo_cat_name and sp.product_type != odoo_cat_name:
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
-                # Vendor Mapping (First word of Title)
-                product_title = p.get('name', '')
-                target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
-                if sp.vendor != target_vendor:
-                    sp.vendor = target_vendor
-                    product_changed = True
+                # Vendor Mapping
+                if sync_vendor:
+                    product_title = p.get('name', '')
+                    target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
+                    if sp.vendor != target_vendor:
+                        sp.vendor = target_vendor
+                        product_changed = True
 
                 if sp.status != 'active':
                     sp.status = 'active'
@@ -560,7 +561,6 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
-                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -574,10 +574,11 @@ def sync_products_master():
                     variant.sku = sku
                     variant_changed = True
                 
-                target_price = str(p['list_price'])
-                if variant.price != target_price:
-                    variant.price = target_price
-                    variant_changed = True
+                if sync_price:
+                    target_price = str(p['list_price'])
+                    if variant.price != target_price:
+                        variant.price = target_price
+                        variant_changed = True
 
                 target_barcode = p.get('barcode', 0) or ''
                 if str(variant.barcode or '') != str(target_barcode):
@@ -596,7 +597,6 @@ def sync_products_master():
                     variant.inventory_management = 'shopify'
                     variant_changed = True
                 
-                # Safely Check Product ID
                 v_product_id = getattr(variant, 'product_id', None)
                 if not v_product_id: 
                     if variant.attributes: v_product_id = variant.attributes.get('product_id')
@@ -608,18 +608,15 @@ def sync_products_master():
                 if variant_changed: variant.save()
                 
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
-                    # --- INVENTORY SYNC OPTIMIZATION ---
-                    # Only update if different
                     qty = int(p.get('qty_available', 0))
                     try:
-                         # Get current Shopify level to compare
                          current_inv = get_shopify_variant_inv_by_sku(sku)
                          if current_inv and int(current_inv['qty']) != qty:
                              shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
-                             log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
+                             log_event('Product Sync', 'Info', f"Updated Stock for {sku}: {qty}")
                     except: pass
 
-                # --- NEW COST PRICE SYNC ---
+                # Cost Price Sync
                 if variant.inventory_item_id:
                     try:
                         cost = float(p.get('standard_price', 0.0))
@@ -627,30 +624,31 @@ def sync_products_master():
                         if float(inv_item.cost or 0) != cost:
                             inv_item.cost = cost
                             inv_item.save()
-                    except Exception as cost_e:
-                        print(f"Cost Sync Error {sku}: {cost_e}")
+                    except: pass
 
-                # Image Sync Logic with Isolation
-                try:
-                    img_data = odoo.get_product_image(p['id'])
-                    if img_data and not sp.images:
-                        if isinstance(img_data, bytes):
-                            img_data = img_data.decode('utf-8')
-                            
-                        image = shopify.Image(prefix_options={'product_id': sp.id})
-                        image.attachment = img_data
-                        image.save()
-                        log_event('Product Sync', 'Info', f"Synced Image for {sku}")
-                except Exception as img_e:
-                     log_event('Product Sync', 'Warning', f"Image Sync Failed for {sku}: {img_e}")
+                # Image Sync
+                if get_config('prod_sync_images', False):
+                    try:
+                        img_data = odoo.get_product_image(p['id'])
+                        if img_data and not sp.images:
+                            if isinstance(img_data, bytes):
+                                img_data = img_data.decode('utf-8')
+                            image = shopify.Image(prefix_options={'product_id': sp.id})
+                            image.attachment = img_data
+                            image.save()
+                            log_event('Product Sync', 'Info', f"Synced Image for {sku}")
+                    except Exception as img_e:
+                        log_event('Product Sync', 'Warning', f"Image Sync Failed for {sku}: {img_e}")
 
-                vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
-                if vendor_code:
-                    metafield = shopify.Metafield({
-                        'key': 'vendor_product_code', 'value': vendor_code, 'type': 'single_line_text_field',
-                        'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id
-                    })
-                    metafield.save()
+                # Metafield Sync
+                if get_config('prod_sync_meta_vendor_code', False):
+                    vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
+                    if vendor_code:
+                        metafield = shopify.Metafield({
+                            'key': 'vendor_product_code', 'value': vendor_code, 'type': 'single_line_text_field',
+                            'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id
+                        })
+                        metafield.save()
                 synced += 1
             except Exception as e:
                 err_msg = str(e)
@@ -781,12 +779,9 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
-# --- ROUTES ---
-
 @app.route('/')
 def dashboard():
     try:
-        # Simplified query for brevity, actual logic uses DB
         logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_products = SyncLog.query.filter(SyncLog.entity.in_(['Product', 'Product Sync', 'Duplicate Scan'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
@@ -797,24 +792,28 @@ def dashboard():
     
     current_settings = {
         "odoo_company_id": get_config('odoo_company_id', None),
-        "locations": get_config('inventory_locations', []), # Fix: Load locations
+        "locations": get_config('inventory_locations', []), 
         "field": get_config('inventory_field', 'qty_available'),
         "sync_zero": get_config('sync_zero_stock', False),
         "combine_committed": get_config('combine_committed', False),
-        
         "cust_direction": get_config('cust_direction', 'bidirectional'),
         "cust_auto_sync": get_config('cust_auto_sync', True),
         "cust_sync_tags": get_config('cust_sync_tags', False),
         "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
         "cust_blacklist_tags": get_config('cust_blacklist_tags', ''),
-
-        # NEW FIELDS FOR PERSISTENCE
+        
         "prod_auto_create": get_config('prod_auto_create', False),
         "prod_auto_publish": get_config('prod_auto_publish', False),
         "prod_sync_images": get_config('prod_sync_images', False),
         "prod_sync_tags": get_config('prod_sync_tags', False),
         "prod_sync_meta_vendor_code": get_config('prod_sync_meta_vendor_code', False),
-        "order_sync_tax": get_config('order_sync_tax', False)
+        "order_sync_tax": get_config('order_sync_tax', False),
+        
+        "prod_sync_price": get_config('prod_sync_price', True),
+        "prod_sync_title": get_config('prod_sync_title', True),
+        "prod_sync_desc": get_config('prod_sync_desc', True),
+        "prod_sync_type": get_config('prod_sync_type', True),
+        "prod_sync_vendor": get_config('prod_sync_vendor', True)
     }
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
@@ -880,7 +879,6 @@ def trigger_duplicate_scan():
 
 @app.route('/sync/orders/manual', methods=['GET'])
 def manual_order_fetch():
-    # UPDATED: Removing 'status=open' to fetch ALL recent orders (including archived/cancelled)
     url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?limit=10"
     headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
     try:
@@ -973,6 +971,12 @@ def api_save_settings():
         set_config('prod_sync_images', data.get('prod_sync_images', False))
         set_config('prod_sync_tags', data.get('prod_sync_tags', False))
         set_config('prod_sync_meta_vendor_code', data.get('prod_sync_meta_vendor_code', False))
+        
+        set_config('prod_sync_price', data.get('prod_sync_price', True))
+        set_config('prod_sync_title', data.get('prod_sync_title', True))
+        set_config('prod_sync_desc', data.get('prod_sync_desc', True))
+        set_config('prod_sync_type', data.get('prod_sync_type', True))
+        set_config('prod_sync_vendor', data.get('prod_sync_vendor', True))
 
         # Orders (NEW)
         set_config('order_sync_tax', data.get('order_sync_tax', False))
