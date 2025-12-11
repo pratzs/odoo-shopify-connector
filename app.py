@@ -327,27 +327,19 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC (FIXED) ---
+        # --- SHIPPING LOGIC ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
             except: cost = 0.0
             
             ship_title = ship_line.get('title', 'Shipping')
-            
-            # Allow >= 0 to include Free Shipping
             if cost >= 0:
                 ship_product_id = None
-                
-                # 1. First Priority: Search by exact Shipping Method Name (e.g. "Free Mobil Nationwide Shipping")
                 if ship_title:
                     ship_product_id = odoo.search_product_by_name(ship_title, company_id)
-
-                # 2. Second Priority: Search by Generic SKU 'SHIP_FEE'
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
-                
-                # 3. Third Priority: Search by Generic Name
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
                 
@@ -362,12 +354,10 @@ def process_order_data(data):
                         }
                         if company_id: sp_vals['company_id'] = int(company_id)
                         odoo.create_product(sp_vals)
-                        # Re-fetch based on what we just created
                         if sp_vals.get('default_code'):
                              ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
                         else:
                              ship_product_id = odoo.search_product_by_name(sp_vals['name'], company_id)
-
                     except Exception as e:
                         log_event('Product', 'Error', f"Failed to create Shipping Product: {e}")
 
@@ -470,7 +460,7 @@ def process_order_data(data):
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
-                'note': note_text  # Set Note on create
+                'note': note_text
             }
             if company_id: vals['company_id'] = int(company_id)
             try:
@@ -565,7 +555,7 @@ def sync_products_master():
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
-                # Vendor Mapping (First word of Title)
+                # Vendor Mapping
                 if sync_vendor:
                     product_title = p.get('name', '')
                     target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
@@ -579,7 +569,6 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
-                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -875,7 +864,7 @@ def sync_inventory_endpoint():
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
 def run_initial_category_import():
     threading.Thread(target=sync_categories_only).start()
-    return jsonify({"message": "Job Started"})
+    return jsonify({"message": "Job Started: Syncing Categories from Shopify for products with empty Odoo categories."})
 
 @app.route('/webhook/products/create', methods=['POST'])
 @app.route('/webhook/products/update', methods=['POST'])
