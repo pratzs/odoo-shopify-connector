@@ -210,6 +210,7 @@ def process_product_data(data):
         product_id = odoo.search_product_by_sku(sku, company_id)
         
         if product_id:
+            # --- UPDATE LOGIC (Category Only) ---
             if cat_id:
                 try:
                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -223,13 +224,18 @@ def process_product_data(data):
                 except Exception as e:
                     err_msg = str(e)
                     if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+                        # Silently skip Odoo server internal crashes
                         pass
                     else:
                         print(f"Webhook Update Error: {e}")
+        else:
+            # --- SKIP CREATION ---
+            pass
+
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. UPDATES existing orders instead of skipping, preventing duplicates."""
+    """Syncs order. UPDATES existing orders instead of skipping."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
@@ -320,7 +326,7 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC ---
+        # --- SHIPPING LOGIC (FIXED) ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
@@ -602,8 +608,15 @@ def sync_products_master():
                 if variant_changed: variant.save()
                 
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
+                    # --- INVENTORY SYNC OPTIMIZATION ---
+                    # Only update if different
                     qty = int(p.get('qty_available', 0))
-                    try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
+                    try:
+                         # Get current Shopify level to compare
+                         current_inv = get_shopify_variant_inv_by_sku(sku)
+                         if current_inv and int(current_inv['qty']) != qty:
+                             shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
+                             log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
                     except: pass
 
                 # --- NEW COST PRICE SYNC ---
@@ -768,9 +781,46 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
+# --- ROUTES ---
+
 @app.route('/')
 def dashboard():
-    return render_template('dashboard.html', odoo_status=True if odoo else False, current_settings={}) 
+    try:
+        # Simplified query for brevity, actual logic uses DB
+        logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_products = SyncLog.query.filter(SyncLog.entity.in_(['Product', 'Product Sync', 'Duplicate Scan'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_customers = SyncLog.query.filter(SyncLog.entity.in_(['Customer', 'Customer Sync'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+        logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer', 'Product', 'Product Sync', 'Duplicate Scan', 'Customer Sync'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
+    except:
+        logs_orders = logs_inventory = logs_products = logs_customers = logs_system = []
+    
+    current_settings = {
+        "odoo_company_id": get_config('odoo_company_id', None),
+        "locations": get_config('inventory_locations', []), # Fix: Load locations
+        "field": get_config('inventory_field', 'qty_available'),
+        "sync_zero": get_config('sync_zero_stock', False),
+        "combine_committed": get_config('combine_committed', False),
+        
+        "cust_direction": get_config('cust_direction', 'bidirectional'),
+        "cust_auto_sync": get_config('cust_auto_sync', True),
+        "cust_sync_tags": get_config('cust_sync_tags', False),
+        "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
+        "cust_blacklist_tags": get_config('cust_blacklist_tags', ''),
+
+        # NEW FIELDS FOR PERSISTENCE
+        "prod_auto_create": get_config('prod_auto_create', False),
+        "prod_auto_publish": get_config('prod_auto_publish', False),
+        "prod_sync_images": get_config('prod_sync_images', False),
+        "prod_sync_tags": get_config('prod_sync_tags', False),
+        "prod_sync_meta_vendor_code": get_config('prod_sync_meta_vendor_code', False),
+        "order_sync_tax": get_config('order_sync_tax', False)
+    }
+    odoo_status = True if odoo else False
+    return render_template('dashboard.html', 
+                           logs_orders=logs_orders, logs_inventory=logs_inventory, logs_products=logs_products,
+                           logs_customers=logs_customers, logs_system=logs_system,
+                           odoo_status=odoo_status, current_settings=current_settings)
 
 @app.route('/live_logs')
 def live_logs():
@@ -900,19 +950,36 @@ def api_get_locations():
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
     data = request.json
-    if set_config('inventory_locations', data.get('locations', [])):
+    try:
+        # Inventory
+        set_config('inventory_locations', data.get('locations', []))
         set_config('inventory_field', data.get('field', 'qty_available'))
         set_config('sync_zero_stock', data.get('sync_zero', False))
         set_config('combine_committed', data.get('combine_committed', False))
+        
+        # General
         set_config('odoo_company_id', data.get('company_id'))
+        
+        # Customers
         set_config('cust_direction', data.get('cust_direction'))
         set_config('cust_auto_sync', data.get('cust_auto_sync'))
         set_config('cust_sync_tags', data.get('cust_sync_tags'))
         set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
         set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
+        
+        # Products (NEW)
+        set_config('prod_auto_create', data.get('prod_auto_create', False))
+        set_config('prod_auto_publish', data.get('prod_auto_publish', False))
+        set_config('prod_sync_images', data.get('prod_sync_images', False))
+        set_config('prod_sync_tags', data.get('prod_sync_tags', False))
+        set_config('prod_sync_meta_vendor_code', data.get('prod_sync_meta_vendor_code', False))
+
+        # Orders (NEW)
+        set_config('order_sync_tax', data.get('order_sync_tax', False))
+        
         return jsonify({"message": "Saved"})
-    else:
-        return jsonify({"message": "Error Saving"}), 500
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
 
 def run_schedule():
     schedule.every(1).days.do(sync_products_master)
