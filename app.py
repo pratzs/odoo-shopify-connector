@@ -510,6 +510,7 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
+                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -560,6 +561,18 @@ def sync_products_master():
                     qty = int(p.get('qty_available', 0))
                     try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
                     except: pass
+
+                # --- NEW COST PRICE SYNC ---
+                if variant.inventory_item_id:
+                    try:
+                        cost = float(p.get('standard_price', 0.0))
+                        inv_item = shopify.InventoryItem.find(variant.inventory_item_id)
+                        if float(inv_item.cost or 0) != cost:
+                            inv_item.cost = cost
+                            inv_item.save()
+                            # log_event('Product Sync', 'Info', f"Updated Cost for {sku}") 
+                    except Exception as cost_e:
+                        print(f"Cost Sync Error {sku}: {cost_e}")
 
                 # Image Sync Logic with Isolation
                 try:
