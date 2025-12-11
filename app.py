@@ -325,24 +325,76 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
+        # --- SHIPPING LOGIC ---
+        # If order has shipping lines, create a service line in Odoo
+        for ship_line in data.get('shipping_lines', []):
+            cost = float(ship_line.get('price', 0.0))
+            if cost > 0:
+                ship_title = ship_line.get('title', 'Shipping')
+                # Try to find a generic shipping product or create one
+                ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
+                if not ship_product_id:
+                    # Create service product for shipping
+                    try:
+                        sp_vals = {
+                            'name': "Shopify Shipping",
+                            'type': 'service',
+                            'list_price': 0.0,
+                            'default_code': 'SHIP_FEE'
+                        }
+                        if company_id: sp_vals['company_id'] = int(company_id)
+                        odoo.create_product(sp_vals)
+                        ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
+                    except: pass
+                
+                if ship_product_id:
+                    lines.append((0, 0, {
+                        'product_id': ship_product_id,
+                        'product_uom_qty': 1,
+                        'price_unit': cost,
+                        'name': ship_title,
+                        'discount': 0.0
+                    }))
+
         if not lines: return False, "No valid lines"
         
+        # --- PAYMENT METHOD LOGIC ---
+        gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
+        note_text = f"Payment Gateway: {gateway}"
+
         if existing_order_id:
             order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state']})
             state = order_info[0]['state'] if order_info else 'unknown'
             if state in ['done', 'cancel']:
                 log_event('Order', 'Skipped', f"Order {client_ref} is {state}. Update skipped.")
                 return True, "Skipped"
-            update_vals = {'order_line': [(5, 0, 0)] + lines, 'partner_shipping_id': shipping_id, 'partner_invoice_id': invoice_id}
+            
+            update_vals = {
+                'order_line': [(5, 0, 0)] + lines,
+                'partner_shipping_id': shipping_id,
+                'partner_invoice_id': invoice_id
+            }
             try:
                 odoo.update_sale_order(existing_order_id, update_vals)
+                # Post message for update context
+                odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
                 log_event('Order', 'Success', f"Updated {client_ref} (Revision)")
                 return True, "Updated"
             except Exception as e:
                 log_event('Order', 'Error', f"Update Failed: {e}")
                 return False, str(e)
         else:
-            vals = {'name': client_ref, 'client_order_ref': client_ref, 'partner_id': partner_id, 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft'}
+            vals = {
+                'name': client_ref, 
+                'client_order_ref': client_ref, 
+                'partner_id': partner_id, 
+                'partner_invoice_id': invoice_id, 
+                'partner_shipping_id': shipping_id, 
+                'order_line': lines, 
+                'user_id': sales_rep_id, 
+                'state': 'draft',
+                'note': note_text  # Add Payment info to internal note
+            }
             if company_id: vals['company_id'] = int(company_id)
             try:
                 odoo.create_sale_order(vals, context={'manual_price': True})
@@ -446,7 +498,6 @@ def sync_products_master():
                 if sp.variants: 
                     variant = sp.variants[0]
                 else: 
-                    # Correctly initialize with prefix_options for API URL construction
                     variant = shopify.Variant(prefix_options={'product_id': sp.id})
                 
                 variant_changed = False
@@ -479,7 +530,6 @@ def sync_products_master():
                 # Safely Check Product ID
                 v_product_id = getattr(variant, 'product_id', None)
                 if not v_product_id: 
-                    # If attribute is missing entirely (common on new objects)
                     if variant.attributes: v_product_id = variant.attributes.get('product_id')
                 
                 if str(v_product_id) != str(sp.id):
@@ -493,13 +543,23 @@ def sync_products_master():
                     try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
                     except: pass
 
-                img_data = odoo.get_product_image(p['id'])
-                if img_data and not sp.images:
-                    image = shopify.Image(prefix_options={'product_id': sp.id})
-                    image.attachment = img_data
-                    image.save()
-                    log_event('Product Sync', 'Info', f"Synced Image for {sku}")
-                
+                # Image Sync Logic with Isolation
+                try:
+                    img_data = odoo.get_product_image(p['id'])
+                    # If image exists in Odoo AND Shopify has NO images
+                    if img_data and not sp.images:
+                        # Decode bytes to string if needed
+                        if isinstance(img_data, bytes):
+                            img_data = img_data.decode('utf-8')
+                            
+                        image = shopify.Image(prefix_options={'product_id': sp.id})
+                        image.attachment = img_data
+                        image.save()
+                        log_event('Product Sync', 'Info', f"Synced Image for {sku}")
+                except Exception as img_e:
+                     # Log image error specifically, but don't fail the whole sync
+                     log_event('Product Sync', 'Warning', f"Image Sync Failed for {sku}: {img_e}")
+
                 vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                 if vendor_code:
                     metafield = shopify.Metafield({
@@ -511,7 +571,7 @@ def sync_products_master():
             except Exception as e:
                 # Catch general product sync failures caused by Odoo crash
                 err_msg = str(e)
-                if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+                if "pos.category" in err_msg or "CacheMiss" in err_msg:
                     pass # Suppress Odoo POS crash errors to avoid confusion
                 else:
                     log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
@@ -561,7 +621,7 @@ def sync_categories_only():
                     odoo_prod['public_categ_ids'] = [cat_id] 
                 except Exception as e:
                     err_msg = str(e)
-                    if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+                    if "pos.category" in err_msg or "CacheMiss" in err_msg:
                         pass # Ignore silent failures for corrupted items
                     else:
                         print(f"Error syncing category for {sku}: {e}")
@@ -733,7 +793,21 @@ def api_get_locations():
     return jsonify([])
 
 @app.route('/api/settings/save', methods=['POST'])
-def api_save_settings(): return jsonify({"message": "Saved"})
+def api_save_settings():
+    data = request.json
+    if set_config('inventory_locations', data.get('locations', [])):
+        set_config('inventory_field', data.get('field', 'qty_available'))
+        set_config('sync_zero_stock', data.get('sync_zero', False))
+        set_config('combine_committed', data.get('combine_committed', False))
+        set_config('odoo_company_id', data.get('company_id'))
+        set_config('cust_direction', data.get('cust_direction'))
+        set_config('cust_auto_sync', data.get('cust_auto_sync'))
+        set_config('cust_sync_tags', data.get('cust_sync_tags'))
+        set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
+        set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
+        return jsonify({"message": "Saved"})
+    else:
+        return jsonify({"message": "Error Saving"}), 500
 
 def run_schedule():
     schedule.every(1).days.do(sync_products_master)
