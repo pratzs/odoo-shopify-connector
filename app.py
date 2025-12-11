@@ -215,8 +215,9 @@ def process_product_data(data):
                         log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'")
                         processed_count += 1
                 except Exception as e:
-                    if "pos.category" in str(e) or "CacheMiss" in str(e):
-                        log_event('Product', 'Warning', f"Skipped {sku}: Odoo POS Data Corrupted (Server-side error).")
+                    err_msg = str(e)
+                    if "pos.category" in err_msg or "CacheMiss" in err_msg:
+                        log_event('Product', 'Warning', f"Skipped {sku}: Odoo POS Data Corruption (Unfixable via API).")
                     else:
                         print(f"Webhook Update Error: {e}")
         else:
@@ -412,8 +413,9 @@ def sync_products_master():
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
                         log_event('Product Sync', 'Info', f"Initialized Odoo Category for {sku}: {cat_name}")
                     except Exception as e:
-                        if "pos.category" in str(e) or "CacheMiss" in str(e):
-                             pass 
+                        err_msg = str(e)
+                        if "pos.category" in err_msg or "CacheMiss" in err_msg:
+                             log_event('Product Sync', 'Warning', f"Skipped {sku}: Odoo POS Data Corruption.")
                         else:
                              print(f"Category Import Error: {e}")
 
@@ -423,7 +425,7 @@ def sync_products_master():
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
-                # Vendor Mapping
+                # Vendor Mapping (First word of Title)
                 product_title = p.get('name', '')
                 target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
                 if sp.vendor != target_vendor:
@@ -434,10 +436,19 @@ def sync_products_master():
                     sp.status = 'active'
                     product_changed = True
                 
-                if product_changed or not shopify_id: sp.save()
+                # Save parent product if changed OR if it's new
+                if product_changed or not shopify_id:
+                    sp.save()
+                    # --- FIX: RELOAD FROM SHOPIFY IF NEW ---
+                    # This ensures we get the Default Variant ID that Shopify auto-creates
+                    if not shopify_id:
+                        sp = shopify.Product.find(sp.id)
                 
+                # Handle Variants
                 if sp.variants: variant = sp.variants[0]
-                else: variant = shopify.Variant()
+                else: 
+                    # Fallback only if absolutely necessary (shouldn't happen with reload fix)
+                    variant = shopify.Variant(prefix_options={'product_id': sp.id})
                 
                 variant_changed = False
                 if variant.sku != sku:
@@ -466,7 +477,7 @@ def sync_products_master():
                     variant.inventory_management = 'shopify'
                     variant_changed = True
                 
-                # --- FIX: Safely Check Product ID ---
+                # Safely Check Product ID
                 v_product_id = getattr(variant, 'product_id', None)
                 if str(v_product_id) != str(sp.id):
                     variant.product_id = sp.id
@@ -495,7 +506,12 @@ def sync_products_master():
                     metafield.save()
                 synced += 1
             except Exception as e:
-                log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
+                # Catch general product sync failures caused by Odoo crash
+                err_msg = str(e)
+                if "pos.category" in err_msg or "CacheMiss" in err_msg:
+                    log_event('Product Sync', 'Warning', f"Skipped {sku}: Odoo POS Data Corruption.")
+                else:
+                    log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
         
         cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
@@ -541,8 +557,9 @@ def sync_categories_only():
                     updated_count += 1
                     odoo_prod['public_categ_ids'] = [cat_id] 
                 except Exception as e:
-                    if "pos.category" in str(e):
-                        pass 
+                    err_msg = str(e)
+                    if "pos.category" in err_msg or "CacheMiss" in err_msg:
+                        pass # Ignore silent failures for corrupted items
                     else:
                         print(f"Error syncing category for {sku}: {e}")
 
