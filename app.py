@@ -732,10 +732,6 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
-# --- START THE SCHEDULER (Outside main) ---
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
-
 @app.route('/')
 def dashboard():
     return render_template('dashboard.html', odoo_status=True if odoo else False, current_settings={}) 
@@ -856,7 +852,10 @@ def run_schedule():
         schedule.run_pending()
         time.sleep(1)
 
+# --- START SCHEDULER (Threaded, outside main so Gunicorn sees it) ---
+t = threading.Thread(target=run_schedule, daemon=True)
+t.start()
+
 if __name__ == '__main__':
-    t = threading.Thread(target=run_schedule, daemon=True)
-    t.start()
+    # Flask Dev Server
     app.run(debug=True)
