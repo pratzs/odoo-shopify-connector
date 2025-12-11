@@ -320,27 +320,19 @@ def process_order_data(data):
             else:
                 log_event('Order', 'Warning', f"Skipped line {sku}: Product not found/created.")
 
-        # --- SHIPPING LOGIC (FIXED) ---
+        # --- SHIPPING LOGIC ---
         for ship_line in data.get('shipping_lines', []):
             try:
                 cost = float(ship_line.get('price', 0.0))
             except: cost = 0.0
             
             ship_title = ship_line.get('title', 'Shipping')
-            
-            # Allow >= 0 to include Free Shipping
             if cost >= 0:
                 ship_product_id = None
-                
-                # 1. First Priority: Search by exact Shipping Method Name (e.g. "Free Mobil Nationwide Shipping")
                 if ship_title:
                     ship_product_id = odoo.search_product_by_name(ship_title, company_id)
-
-                # 2. Second Priority: Search by Generic SKU 'SHIP_FEE'
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
-                
-                # 3. Third Priority: Search by Generic Name
                 if not ship_product_id:
                     ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
                 
@@ -355,12 +347,10 @@ def process_order_data(data):
                         }
                         if company_id: sp_vals['company_id'] = int(company_id)
                         odoo.create_product(sp_vals)
-                        # Re-fetch based on what we just created
                         if sp_vals.get('default_code'):
                              ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
                         else:
                              ship_product_id = odoo.search_product_by_name(sp_vals['name'], company_id)
-
                     except Exception as e:
                         log_event('Product', 'Error', f"Failed to create Shipping Product: {e}")
 
@@ -377,22 +367,75 @@ def process_order_data(data):
 
         if not lines: return False, "No valid lines"
         
-        # --- PAYMENT METHOD LOGIC (FIXED) ---
+        # --- PAYMENT METHOD LOGIC ---
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
         if existing_order_id:
-            order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state']})
-            state = order_info[0]['state'] if order_info else 'unknown'
+            # --- SMART CHANGE DETECTION (NEW) ---
+            order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'note', 'order_line']})
+            if not order_info:
+                 return False, "Order not found in Odoo"
+                 
+            current_order = order_info[0]
+            state = current_order['state']
+            
             if state in ['done', 'cancel']:
                 log_event('Order', 'Skipped', f"Order {client_ref} is {state}. Update skipped.")
                 return True, "Skipped"
             
+            # Change Detection Logic
+            has_changes = False
+            
+            # 1. Check Note
+            existing_note = current_order.get('note') or ''
+            if note_text != existing_note:
+                has_changes = True
+
+            # 2. Check Lines
+            if not has_changes:
+                current_line_ids = current_order.get('order_line', [])
+                if len(current_line_ids) != len(lines):
+                    has_changes = True
+                elif current_line_ids:
+                    # Fetch detailed line info to compare
+                    current_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                        'sale.order.line', 'read', [current_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit', 'discount']})
+                    
+                    # Normalize Odoo Data
+                    curr_set = []
+                    for l in current_lines:
+                        pid = l['product_id'][0] if isinstance(l['product_id'], (list, tuple)) else l['product_id']
+                        curr_set.append((pid, float(l['product_uom_qty']), float(l['price_unit']), float(l['discount'])))
+                    curr_set.sort()
+
+                    # Normalize Incoming Data
+                    new_set = []
+                    for l in lines:
+                        d = l[2] # The data dict is the 3rd element in (0,0, {})
+                        new_set.append((d['product_id'], float(d['product_uom_qty']), float(d['price_unit']), float(d['discount'])))
+                    new_set.sort()
+
+                    if len(curr_set) != len(new_set):
+                         has_changes = True
+                    else:
+                        for c, n in zip(curr_set, new_set):
+                            # Compare ID, Qty, Price, Discount with tolerance
+                            if c[0] != n[0] or abs(c[1]-n[1])>0.001 or abs(c[2]-n[2])>0.01 or abs(c[3]-n[3])>0.01:
+                                has_changes = True
+                                break
+            
+            if not has_changes:
+                # IMPORTANT: Skip update if nothing changed
+                log_event('Order', 'Info', f"Order {client_ref} is up to date. Skipped update.")
+                return True, "Up to Date"
+
+            # If changes detected, proceed with update
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
                 'partner_shipping_id': shipping_id,
                 'partner_invoice_id': invoice_id,
-                'note': note_text  # Update Note on edit
+                'note': note_text 
             }
             try:
                 odoo.update_sale_order(existing_order_id, update_vals)
@@ -403,6 +446,7 @@ def process_order_data(data):
                 log_event('Order', 'Error', f"Update Failed: {e}")
                 return False, str(e)
         else:
+            # --- CREATE PATH ---
             vals = {
                 'name': client_ref, 
                 'client_order_ref': client_ref, 
@@ -412,7 +456,7 @@ def process_order_data(data):
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
-                'note': note_text  # Set Note on create
+                'note': note_text
             }
             if company_id: vals['company_id'] = int(company_id)
             try:
@@ -510,7 +554,6 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
-                    # RELOAD TO FIX KEY ERROR
                     if not shopify_id:
                         sp = shopify.Product.find(sp.id)
                 
@@ -558,15 +601,8 @@ def sync_products_master():
                 if variant_changed: variant.save()
                 
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
-                    # --- INVENTORY SYNC OPTIMIZATION ---
-                    # Only update if different
                     qty = int(p.get('qty_available', 0))
-                    try:
-                         # Get current Shopify level to compare
-                         current_inv = get_shopify_variant_inv_by_sku(sku)
-                         if current_inv and int(current_inv['qty']) != qty:
-                             shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
-                             log_event('Product Sync', 'Info', f"Updated Stock for {sku} during master sync: -> {qty}")
+                    try: shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
                     except: pass
 
                 # --- NEW COST PRICE SYNC ---
@@ -577,7 +613,6 @@ def sync_products_master():
                         if float(inv_item.cost or 0) != cost:
                             inv_item.cost = cost
                             inv_item.save()
-                            # log_event('Product Sync', 'Info', f"Updated Cost for {sku}") 
                     except Exception as cost_e:
                         print(f"Cost Sync Error {sku}: {cost_e}")
 
@@ -732,6 +767,10 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
+# --- START THE SCHEDULER (Outside main) ---
+t = threading.Thread(target=run_schedule, daemon=True)
+t.start()
+
 @app.route('/')
 def dashboard():
     return render_template('dashboard.html', odoo_status=True if odoo else False, current_settings={}) 
@@ -793,10 +832,45 @@ def trigger_duplicate_scan():
     return jsonify({"message": "Started"})
 
 @app.route('/sync/orders/manual', methods=['GET'])
-def manual_order_fetch(): return jsonify({"orders": []})
+def manual_order_fetch():
+    # UPDATED: Removing 'status=open' to fetch ALL recent orders (including archived/cancelled)
+    url = f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders.json?limit=10"
+    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+    try:
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code}"})
+        orders = res.json().get('orders', [])
+    except Exception as e:
+        return jsonify({"orders": [], "error": str(e)})
+    
+    mapped_orders = []
+    for o in orders:
+        status = "Not Synced"
+        try:
+            client_ref = f"ONLINE_{o['name']}"
+            exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+            if exists: status = "Synced"
+        except: pass
+        if o.get('cancelled_at'): status = "Cancelled"
+        mapped_orders.append({
+            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status
+        })
+    return jsonify({"orders": mapped_orders})
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
-def import_selected_orders(): return jsonify({"message": "Done"})
+def import_selected_orders():
+    ids = request.json.get('order_ids', [])
+    headers = {"X-Shopify-Access-Token": os.getenv('SHOPIFY_TOKEN')}
+    synced = 0
+    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
+    for oid in ids:
+        res = requests.get(f"https://{os.getenv('SHOPIFY_URL')}/admin/api/2025-10/orders/{oid}.json", headers=headers)
+        if res.status_code == 200:
+            success, _ = process_order_data(res.json().get('order'))
+            if success: synced += 1
+    return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
@@ -852,10 +926,6 @@ def run_schedule():
         schedule.run_pending()
         time.sleep(1)
 
-# --- START SCHEDULER (Threaded, outside main so Gunicorn sees it) ---
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
-
 if __name__ == '__main__':
-    # Flask Dev Server
+    # No start here to prevent duplicates locally
     app.run(debug=True)
