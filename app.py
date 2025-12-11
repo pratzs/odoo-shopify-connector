@@ -56,13 +56,21 @@ active_processing_ids = set()
 
 # --- HELPERS ---
 def get_config(key, default=None):
+    """Safely retrieve config with session management"""
     try:
         setting = AppSetting.query.get(key)
-        try: return json.loads(setting.value)
-        except: return setting.value
-    except: return default
+        if not setting:
+            return default
+        try: 
+            return json.loads(setting.value)
+        except: 
+            return setting.value
+    except Exception as e:
+        print(f"Config Read Error ({key}): {e}")
+        return default
 
 def set_config(key, value):
+    """Safely save config with rollback support"""
     try:
         setting = AppSetting.query.get(key)
         if not setting:
@@ -71,7 +79,10 @@ def set_config(key, value):
         setting.value = json.dumps(value)
         db.session.commit()
         return True
-    except: return False
+    except Exception as e:
+        print(f"Config Save Error ({key}): {e}")
+        db.session.rollback()
+        return False
 
 def verify_shopify(data, hmac_header):
     secret = os.getenv('SHOPIFY_SECRET')
