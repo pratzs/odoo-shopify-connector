@@ -127,19 +127,24 @@
                                         <label class="form-label-sm">Select Fields to Update from Odoo</label>
                                         <div class="d-flex flex-wrap gap-3 mb-3">
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldPrice" checked disabled> <label class="form-check-label" title="Maps Odoo List Price -> Shopify Price">Price <i class="bi bi-info-circle small text-muted"></i></label>
+                                                <input class="form-check-input" type="checkbox" id="fieldPrice" {% if current_settings.prod_sync_price %}checked{% endif %}> 
+                                                <label class="form-check-label" title="Maps Odoo List Price -> Shopify Price">Price <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldTitle" checked disabled> <label class="form-check-label" title="Maps Odoo Name -> Shopify Title">Title <i class="bi bi-info-circle small text-muted"></i></label>
+                                                <input class="form-check-input" type="checkbox" id="fieldTitle" {% if current_settings.prod_sync_title %}checked{% endif %}> 
+                                                <label class="form-check-label" title="Maps Odoo Name -> Shopify Title">Title <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                             <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldDesc" checked disabled> <label class="form-check-label" title="Maps Odoo Sales Description -> Shopify Description">Description <i class="bi bi-info-circle small text-muted"></i></label>
+                                                <input class="form-check-input" type="checkbox" id="fieldDesc" {% if current_settings.prod_sync_desc %}checked{% endif %}> 
+                                                <label class="form-check-label" title="Maps Odoo Sales Description -> Shopify Description">Description <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                              <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldProductType" checked disabled> <label class="form-check-label" title="Maps Odoo Ecommerce Category -> Shopify Product Type">Product Type <i class="bi bi-info-circle small text-muted"></i></label>
+                                                <input class="form-check-input" type="checkbox" id="fieldProductType" {% if current_settings.prod_sync_type %}checked{% endif %}> 
+                                                <label class="form-check-label" title="Maps Odoo Ecommerce Category -> Shopify Product Type">Product Type <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                              <div class="form-check">
-                                                <input class="form-check-input" type="checkbox" id="fieldVendor" checked disabled> <label class="form-check-label" title="Maps First Word of Odoo Name -> Shopify Vendor">Vendor <i class="bi bi-info-circle small text-muted"></i></label>
+                                                <input class="form-check-input" type="checkbox" id="fieldVendor" {% if current_settings.prod_sync_vendor %}checked{% endif %}> 
+                                                <label class="form-check-label" title="Maps First Word of Odoo Name -> Shopify Vendor">Vendor <i class="bi bi-info-circle small text-muted"></i></label>
                                             </div>
                                             <div class="form-check">
                                                 <input class="form-check-input" type="checkbox" id="fieldTags" {% if current_settings.prod_sync_tags %}checked{% endif %}> <label class="form-check-label" title="Maps Odoo Tags -> Shopify Tags (Appends missing tags, keeps existing)">Tags <i class="bi bi-info-circle small text-muted"></i></label>
@@ -339,6 +344,40 @@
                 const utc = el.getAttribute('data-utc');
                 if(utc) el.innerText = formatLocalTime(utc);
             });
+            
+            // --- RESTORE SETTINGS ON LOAD ---
+            // Products
+            if(document.getElementById('prodAutoCreate')) document.getElementById('prodAutoCreate').checked = SAVED_SETTINGS.prod_auto_create;
+            if(document.getElementById('prodAutoPublish')) document.getElementById('prodAutoPublish').checked = SAVED_SETTINGS.prod_auto_publish;
+            if(document.getElementById('prodSyncImages')) document.getElementById('prodSyncImages').checked = SAVED_SETTINGS.prod_sync_images;
+            if(document.getElementById('fieldTags')) document.getElementById('fieldTags').checked = SAVED_SETTINGS.prod_sync_tags;
+            if(document.getElementById('fieldMetaVendorCode')) document.getElementById('fieldMetaVendorCode').checked = SAVED_SETTINGS.prod_sync_meta_vendor_code;
+            
+            // New Unlocked Product Fields
+            if(document.getElementById('fieldPrice')) document.getElementById('fieldPrice').checked = SAVED_SETTINGS.prod_sync_price;
+            if(document.getElementById('fieldTitle')) document.getElementById('fieldTitle').checked = SAVED_SETTINGS.prod_sync_title;
+            if(document.getElementById('fieldDesc')) document.getElementById('fieldDesc').checked = SAVED_SETTINGS.prod_sync_desc;
+            if(document.getElementById('fieldProductType')) document.getElementById('fieldProductType').checked = SAVED_SETTINGS.prod_sync_type;
+            if(document.getElementById('fieldVendor')) document.getElementById('fieldVendor').checked = SAVED_SETTINGS.prod_sync_vendor;
+
+            // Orders
+            if(document.getElementById('orderSyncTax')) document.getElementById('orderSyncTax').checked = SAVED_SETTINGS.order_sync_tax;
+
+            // Inventory
+            if(document.getElementById('checkZeroStock')) document.getElementById('checkZeroStock').checked = SAVED_SETTINGS.sync_zero;
+            if(document.getElementById('checkCommitted')) document.getElementById('checkCommitted').checked = SAVED_SETTINGS.combine_committed;
+            if(document.getElementById('invType')) document.getElementById('invType').value = SAVED_SETTINGS.field || 'qty_available';
+
+            // Customers
+            if(document.getElementById('custSyncDirection')) document.getElementById('custSyncDirection').value = SAVED_SETTINGS.cust_direction || 'bidirectional';
+            if(document.getElementById('custAutoSync')) document.getElementById('custAutoSync').checked = SAVED_SETTINGS.cust_auto_sync;
+            if(document.getElementById('custSyncTagsSwitch')) {
+                document.getElementById('custSyncTagsSwitch').checked = SAVED_SETTINGS.cust_sync_tags;
+                toggleTagFields(); 
+            }
+            if(document.getElementById('custWhitelistTags')) document.getElementById('custWhitelistTags').value = SAVED_SETTINGS.cust_whitelist_tags || '';
+            if(document.getElementById('custBlacklistTags')) document.getElementById('custBlacklistTags').value = SAVED_SETTINGS.cust_blacklist_tags || '';
+
             toggleTagFields();
         });
 
@@ -417,6 +456,13 @@
                 prod_sync_images: document.getElementById('prodSyncImages').checked,
                 prod_sync_tags: document.getElementById('fieldTags').checked,
                 prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
+                
+                // New Unlocked Fields
+                prod_sync_price: document.getElementById('fieldPrice').checked,
+                prod_sync_title: document.getElementById('fieldTitle').checked,
+                prod_sync_desc: document.getElementById('fieldDesc').checked,
+                prod_sync_type: document.getElementById('fieldProductType').checked,
+                prod_sync_vendor: document.getElementById('fieldVendor').checked,
 
                 // Orders
                 order_sync_tax: document.getElementById('orderSyncTax').checked,
