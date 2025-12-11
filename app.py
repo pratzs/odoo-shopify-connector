@@ -765,6 +765,50 @@ def sync_customers_master():
 
         log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.")
 
+def archive_shopify_duplicates():
+    """Scans Shopify for duplicate SKUs and archives the older ones."""
+    if not setup_shopify_session(): return
+
+    log_event('Duplicate Scan', 'Info', "Starting scan for duplicate SKUs...")
+    
+    sku_map = {} # SKU -> List of Products
+    page = shopify.Product.find(limit=250)
+    
+    # 1. Build Map
+    while page:
+        for product in page:
+            if product.status == 'archived': continue
+            
+            # Use first variant's SKU for identification
+            sku = product.variants[0].sku if product.variants else None
+            if sku:
+                if sku not in sku_map: sku_map[sku] = []
+                sku_map[sku].append(product)
+        
+        if page.has_next_page(): page = page.next_page()
+        else: break
+    
+    # 2. Process Duplicates
+    archived_count = 0
+    for sku, products in sku_map.items():
+        if len(products) > 1:
+            # Sort by created_at (keep the newest)
+            # Format: 2024-10-05T12:00:00-04:00
+            products.sort(key=lambda x: x.created_at, reverse=True)
+            
+            # Keep the first one (index 0), archive the rest
+            to_archive = products[1:]
+            for p in to_archive:
+                try:
+                    p.status = 'archived'
+                    p.save()
+                    archived_count += 1
+                    log_event('Duplicate Scan', 'Warning', f"Archived Duplicate: {p.title} (SKU: {sku})")
+                except Exception as e:
+                    print(f"Failed to archive {p.id}: {e}")
+
+    log_event('Duplicate Scan', 'Success', f"Scan Complete. Archived {archived_count} duplicates.")
+
 def sync_categories_only():
     """Optimized ONE-TIME import of Categories from Shopify to Odoo."""
     with app.app_context():
