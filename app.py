@@ -330,17 +330,37 @@ def process_order_data(data):
             
             # Allow >= 0 to include Free Shipping
             if cost >= 0:
-                ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
+                ship_product_id = None
+                
+                # 1. First Priority: Search by exact Shipping Method Name (e.g. "Free Mobil Nationwide Shipping")
+                if ship_title:
+                    ship_product_id = odoo.search_product_by_name(ship_title, company_id)
+
+                # 2. Second Priority: Search by Generic SKU 'SHIP_FEE'
+                if not ship_product_id:
+                    ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
+                
+                # 3. Third Priority: Search by Generic Name
+                if not ship_product_id:
+                    ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
                 
                 if not ship_product_id:
-                    log_event('Product', 'Info', "Creating 'Shopify Shipping' Service Product...")
+                    log_event('Product', 'Info', f"Creating new Shipping Service: {ship_title}")
                     try:
                         sp_vals = {
-                            'name': "Shopify Shipping", 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'
+                            'name': ship_title if ship_title else "Shopify Shipping", 
+                            'type': 'service', 
+                            'list_price': 0.0, 
+                            'default_code': 'SHIP_FEE' if not odoo.search_product_by_sku("SHIP_FEE", company_id) else None 
                         }
                         if company_id: sp_vals['company_id'] = int(company_id)
                         odoo.create_product(sp_vals)
-                        ship_product_id = odoo.search_product_by_name("Shopify Shipping", company_id)
+                        # Re-fetch based on what we just created
+                        if sp_vals.get('default_code'):
+                             ship_product_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
+                        else:
+                             ship_product_id = odoo.search_product_by_name(sp_vals['name'], company_id)
+
                     except Exception as e:
                         log_event('Product', 'Error', f"Failed to create Shipping Product: {e}")
 
@@ -353,7 +373,7 @@ def process_order_data(data):
                         'discount': 0.0
                     }))
                 else:
-                    log_event('Order', 'Warning', "Shipping line skipped: Could not find/create 'Shopify Shipping' product.")
+                    log_event('Order', 'Warning', "Shipping line skipped: Could not find/create valid shipping product.")
 
         if not lines: return False, "No valid lines"
         
@@ -574,6 +594,7 @@ def sync_products_master():
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
 def sync_categories_only():
+    """Optimized ONE-TIME import of Categories from Shopify to Odoo."""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Category Sync Failed: Connection Error")
