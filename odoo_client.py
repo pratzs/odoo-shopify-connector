@@ -218,7 +218,8 @@ class OdooClient:
                 ('company_id', '=', False)
             ]
         
-        fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id']
+        # ADDED 'user_id' to this list to fetch Salesperson
+        fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
 
