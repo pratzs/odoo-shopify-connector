@@ -976,33 +976,42 @@ def cleanup_shopify_products(odoo_active_skus):
             else: break
     except: pass
     if archived_count > 0: log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} products.")
-
 def perform_inventory_sync(lookback_minutes):
+    """Checks Odoo for recent stock moves and updates Shopify."""
     if not odoo or not setup_shopify_session(): return 0, 0
+    
     target_locations = get_config('inventory_locations', [])
     target_field = get_config('inventory_field', 'qty_available')
     sync_zero = get_config('sync_zero_stock', False)
     company_id = get_config('odoo_company_id', None)
+    
     if not company_id:
         try:
             u = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
             if u: company_id = u[0]['company_id'][0]
         except: pass
 
+    # --- UPDATED: Use Stock Moves instead of Product Write Date ---
     last_run = datetime.utcnow() - timedelta(minutes=lookback_minutes)
-    try: product_ids = odoo.get_changed_products(str(last_run), company_id)
-    except: return 0, 0
+    try: 
+        product_ids = odoo.get_product_ids_with_recent_stock_moves(str(last_run), company_id)
+    except Exception as e: 
+        print(f"Inventory Crawl Error: {e}")
+        return 0, 0
     
     count = 0
     updates = 0
     for p_id in product_ids:
         total_odoo = int(odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field))
         if sync_zero and total_odoo <= 0: continue
+        
         p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [p_id], {'fields': ['default_code']})
         sku = p_data[0].get('default_code')
         if not sku: continue
+        
         shopify_info = get_shopify_variant_inv_by_sku(sku)
         if not shopify_info: continue
+        
         if int(shopify_info['qty']) != total_odoo:
             try:
                 shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=total_odoo)
@@ -1011,6 +1020,7 @@ def perform_inventory_sync(lookback_minutes):
             except Exception as e: print(f"Inv Error {sku}: {e}")
         count += 1
     return count, updates
+
 
 def scheduled_inventory_sync():
     with app.app_context():
@@ -1223,11 +1233,16 @@ def api_save_settings():
     except Exception as e:
         return jsonify({"message": str(e)}), 500
 
+
 def run_schedule():
-    schedule.every(1).days.do(sync_products_master)
-    schedule.every(1).days.do(sync_customers_master)
-    schedule.every(30).days.do(archive_shopify_duplicates)
-    schedule.every(30).minutes.do(scheduled_inventory_sync)
+    # --- UPDATED: Run tasks in Threads so they don't block each other ---
+    schedule.every(1).days.do(lambda: threading.Thread(target=sync_products_master).start())
+    schedule.every(1).days.do(lambda: threading.Thread(target=sync_customers_master).start())
+    schedule.every(30).days.do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
+    
+    # 30 Minute Inventory Sync
+    schedule.every(30).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
