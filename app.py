@@ -726,7 +726,12 @@ def sync_products_master():
         log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
 
 def sync_customers_master():
-    """Odoo -> Shopify Customer Sync (Master)"""
+    """
+    Odoo -> Shopify Customer Sync (Master). 
+    - Pushes VAT and Company Name.
+    - Merges Odoo Tags (Preserves existing Shopify tags).
+    - Maps Odoo Salesperson -> Shopify 'custom.salesrep' Metafield.
+    """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Customer Sync Failed: Connection Error")
@@ -739,9 +744,10 @@ def sync_customers_master():
             return
 
         company_id = get_config('odoo_company_id')
+        # We still use these to DECIDE if we should sync, but we will sync ALL tags found on the customer
         whitelist = [t.strip() for t in get_config('cust_whitelist_tags', '').split(',') if t.strip()]
         blacklist = [t.strip() for t in get_config('cust_blacklist_tags', '').split(',') if t.strip()]
-        use_tags = get_config('cust_sync_tags', False)
+        use_tags_filter = get_config('cust_sync_tags', False)
 
         # 2. Fetch Odoo Customers (Active Companies & Individuals)
         # Using a far past date to simulate "Get All" for the manual trigger
@@ -756,11 +762,13 @@ def sync_customers_master():
             email = p.get('email')
             if not email or "@" not in email: continue # Shopify requires valid email
 
-            # 3. Tag Filtering Logic
-            if use_tags:
-                p_tags = odoo.get_tag_names(p.get('category_id', []))
-                if blacklist and any(t in p_tags for t in blacklist): continue
-                if whitelist and not any(t in p_tags for t in whitelist): continue
+            # Get Odoo Tags Names
+            odoo_tags = odoo.get_tag_names(p.get('category_id', []))
+
+            # 3. Filter Logic (Should we sync this customer?)
+            if use_tags_filter:
+                if blacklist and any(t in odoo_tags for t in blacklist): continue
+                if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
             try:
                 # 4. Find or Init Shopify Customer
@@ -777,7 +785,7 @@ def sync_customers_master():
                 c.phone = p.get('phone') or p.get('mobile')
                 c.verified_email = True
                 
-                # 6. Map Address & Company (Critical for B2B)
+                # 6. Map Address & Company
                 address_data = {
                     'address1': p.get('street') or '',
                     'city': p.get('city') or '',
@@ -789,35 +797,51 @@ def sync_customers_master():
                     'last_name': c.last_name,
                     'default': True
                 }
-                
-                # Resolve Country Code (Odoo returns [id, "New Zealand"])
-                if p.get('country_id'):
-                    # Quick lookup to get ISO code would be ideal, but for now we try name matching
-                    # Note: You might want to enhance OdooClient to return 'code' field for country
-                    pass 
-
                 c.addresses = [shopify.Address(address_data)]
                 
-                # 7. Map VAT/Tax ID to Metafield
+                # 7. TAG SYNC (Merge Strategy)
+                # Get current Shopify tags as a list
+                current_shopify_tags = [t.strip() for t in c.tags.split(',')] if c.tags else []
+                
+                # Combine Odoo tags with existing Shopify tags (Set union removes duplicates)
+                # This ensures we add new Odoo tags without deleting manual Shopify tags
+                final_tag_list = list(set(current_shopify_tags + odoo_tags))
+                c.tags = ",".join(final_tag_list)
+
+                # 8. PREPARE METAFIELDS
+                metafields_to_save = []
+
+                # VAT Metafield
                 vat = p.get('vat')
                 if vat:
-                    # Sync to Note (visible in Admin)
                     c.note = f"VAT Number: {vat}"
-                    
-                    # Sync to Metafield (usable in Theme/Checkout)
-                    c.metafields = [
-                        shopify.Metafield({
-                            'key': 'vat_number',
-                            'value': vat,
-                            'type': 'single_line_text_field',
-                            'namespace': 'custom'
-                        })
-                    ]
-                    c.tax_exempt = True # Often B2B customers are tax exempt in Shopify logic
+                    metafields_to_save.append(shopify.Metafield({
+                        'key': 'vat_number',
+                        'value': vat,
+                        'type': 'single_line_text_field',
+                        'namespace': 'custom'
+                    }))
+                    c.tax_exempt = True 
+
+                # SALESPERSON Metafield (New Logic)
+                # Odoo returns user_id as [id, "Name"]
+                salesperson_field = p.get('user_id')
+                if salesperson_field:
+                    rep_name = salesperson_field[1] # Get the name string
+                    metafields_to_save.append(shopify.Metafield({
+                        'key': 'salesrep',
+                        'value': rep_name,
+                        'type': 'single_line_text_field',
+                        'namespace': 'custom'
+                    }))
+
+                # Assign accumulated metafields
+                if metafields_to_save:
+                    c.metafields = metafields_to_save
 
                 c.save()
                 
-                # 8. Link in DB
+                # 9. Link in DB
                 if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id)).first():
                     new_map = CustomerMap(shopify_customer_id=str(c.id), odoo_partner_id=p['id'], email=email)
                     db.session.add(new_map)
