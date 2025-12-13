@@ -422,6 +422,7 @@ def auth():
     session = shopify.Session(shop_url, '2024-01')
     return redirect(session.create_permission_url(scopes, url_for('callback', _external=True)))
 
+
 @app.route('/shopify/callback')
 def callback():
     shop_url = request.args.get('shop')
