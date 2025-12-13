@@ -441,6 +441,7 @@ def callback():
     shop_url = request.args.get('shop')
     session = shopify.Session(shop_url, '2024-01')
     token = session.request_token(request.args)
+    
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop:
         shop = Shop(shop_url=shop_url)
@@ -448,6 +449,34 @@ def callback():
     shop.access_token = token
     shop.is_active = True
     db.session.commit()
+    
+    # --- REGISTER WEBHOOKS (CRITICAL FOR AUTO-SYNC) ---
+    with shopify.Session.temp(shop_url, '2024-01', token):
+        hooks = [
+            # 1. Triggers when a new order is placed (Instant Sync)
+            {'topic': 'orders/create', 'address': f'{APP_URL}/webhook/orders/updated'},
+            
+            # 2. Triggers when an order changes (Payment, fulfillment, etc.)
+            {'topic': 'orders/updated', 'address': f'{APP_URL}/webhook/orders/updated'},
+            
+            # 3. Product updates (for inventory/mapping)
+            {'topic': 'products/update', 'address': f'{APP_URL}/webhook/products/update'},
+            
+            # 4. Cleanup when app is deleted
+            {'topic': 'app/uninstalled', 'address': f'{APP_URL}/webhook/app/uninstalled'}
+        ]
+        
+        for h in hooks:
+            try:
+                w = shopify.Webhook()
+                w.topic = h['topic']
+                w.address = h['address']
+                w.format = 'json'
+                w.save()
+                print(f"Webhook {h['topic']} registered to {h['address']}")
+            except Exception as e:
+                print(f"Failed to register {h['topic']}: {e}")
+
     return redirect(url_for('index', shop=shop_url))
 
 @app.route('/live_logs_frame')
