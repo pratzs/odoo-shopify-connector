@@ -15,7 +15,16 @@
             border-radius: 0.375rem;
             overflow: hidden;
             border: 1px solid #dee2e6;
+            background-color: #1e1e1e; /* Dark background for logs */
+            color: #00ff00; /* Console green text */
+            font-family: monospace;
+            padding: 15px;
+            overflow-y: scroll;
         }
+        .log-entry { border-bottom: 1px solid #333; padding: 4px 0; }
+        .log-error { color: #ff4d4d; }
+        .log-success { color: #00ff00; }
+        .log-info { color: #cccccc; }
         .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;}
         .form-label-sm { font-size: 0.85rem; font-weight: 600; color: #6c757d; }
     </style>
@@ -40,35 +49,37 @@
         <div class="row mb-4">
             <div class="col-md-12">
                 <div class="card">
-                    <div class="card-header bg-white">
-                        <h5 class="mb-0"><i class="bi bi-database-fill-gear"></i> Odoo Connection</h5>
+                    <div class="card-header bg-white" data-bs-toggle="collapse" href="#odooConfigCollapse" role="button" aria-expanded="false">
+                        <h5 class="mb-0"><i class="bi bi-database-fill-gear"></i> Odoo Connection (Click to Edit)</h5>
                     </div>
-                    <div class="card-body">
-                        <form id="odooCredsForm">
-                            <div class="row g-3">
-                                <div class="col-md-6">
-                                    <label class="form-label-sm">Odoo URL (e.g., https://my-odoo.com)</label>
-                                    <input type="text" class="form-control" id="odooUrl" value="{{ shop.odoo_url or '' }}" required>
+                    <div class="collapse" id="odooConfigCollapse">
+                        <div class="card-body">
+                            <form id="odooCredsForm">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Odoo URL (No trailing slash)</label>
+                                        <input type="text" class="form-control" id="odooUrl" value="{{ shop.odoo_url or '' }}" required placeholder="https://odoo.mycompany.com">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Database Name</label>
+                                        <input type="text" class="form-control" id="odooDb" value="{{ shop.odoo_db or '' }}" required>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Username (Email)</label>
+                                        <input type="text" class="form-control" id="odooUser" value="{{ shop.odoo_username or '' }}" required>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">API Key / Password</label>
+                                        <input type="password" class="form-control" id="odooPass" value="{{ shop.odoo_password or '' }}" required>
+                                    </div>
+                                    <div class="col-12 text-end">
+                                        <button type="submit" class="btn btn-primary" id="saveCredsBtn">
+                                            <i class="bi bi-plug"></i> Save & Test Connection
+                                        </button>
+                                    </div>
                                 </div>
-                                <div class="col-md-6">
-                                    <label class="form-label-sm">Database Name</label>
-                                    <input type="text" class="form-control" id="odooDb" value="{{ shop.odoo_db or '' }}" required>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label-sm">Username (Email)</label>
-                                    <input type="text" class="form-control" id="odooUser" value="{{ shop.odoo_username or '' }}" required>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label-sm">API Key / Password</label>
-                                    <input type="password" class="form-control" id="odooPass" value="{{ shop.odoo_password or '' }}" required>
-                                </div>
-                                <div class="col-12 text-end">
-                                    <button type="submit" class="btn btn-primary" id="saveCredsBtn">
-                                        <i class="bi bi-plug"></i> Save & Test Connection
-                                    </button>
-                                </div>
-                            </div>
-                        </form>
+                            </form>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -89,42 +100,99 @@
                 <div class="tab-content">
                     
                     <div class="tab-pane fade show active p-3" id="live-logs">
-                        <div id="log-container" class="log-frame-container bg-light p-3 font-monospace small" style="overflow-y: scroll;">
-                            <div class="text-center text-muted mt-5">Loading logs...</div>
+                        <div id="log-container" class="log-frame-container">
+                            <div class="text-center text-muted mt-5">Waiting for logs...</div>
                         </div>
                     </div>
                     
                     <div class="tab-pane fade p-4" id="settings">
-                        <div id="settingsOverlay" class="text-center p-5" style="display: none;">
-                            <h4 class="text-muted">Please connect Odoo first.</h4>
+                        
+                        <div class="mb-4">
+                            <h6 class="text-muted text-uppercase small fw-bold mb-3">Manual Actions</h6>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <button onclick="triggerAction('/sync/inventory')" class="btn btn-sm btn-outline-primary"><i class="bi bi-box-seam"></i> Sync Inventory Now</button>
+                                <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-sm btn-outline-warning text-dark"><i class="bi bi-arrow-repeat"></i> Sync All Products</button>
+                                <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-sm btn-outline-success"><i class="bi bi-people"></i> Sync Customers</button>
+                            </div>
                         </div>
+                        <hr>
 
                         <div id="settingsContent">
+                            
                             <div class="mb-4">
-                                <label class="form-label-sm">Odoo Company Context</label>
-                                <input type="text" class="form-control" id="odooCompanyId" value="{{ shop.odoo_company_id or '' }}" placeholder="Enter Company ID (e.g. 1)">
-                                <div class="form-text">Leave blank for default company.</div>
-                            </div>
-
-                            <hr>
-
-                            <div class="mb-4">
-                                <div class="section-header"><i class="bi bi-boxes"></i> Inventory</div>
-                                <div class="form-check form-switch mb-2">
-                                    <input class="form-check-input" type="checkbox" id="checkZeroStock">
-                                    <label class="form-check-label">Do not sync zero stock</label>
-                                </div>
+                                <div class="section-header"><i class="bi bi-building"></i> General</div>
                                 <div class="mb-3">
-                                    <label class="form-label-sm">Inventory Field</label>
-                                    <select class="form-select" id="invType">
-                                        <option value="qty_available">Quantity On Hand</option>
-                                        <option value="virtual_available">Forecasted Quantity</option>
-                                    </select>
+                                    <label class="form-label-sm">Odoo Company Context (ID)</label>
+                                    <input type="text" class="form-control" id="odooCompanyId" placeholder="e.g. 1">
+                                    <div class="form-text">Leave blank to use default. Check URL in Odoo for 'cid=X'.</div>
                                 </div>
                             </div>
 
-                            <div class="text-end">
-                                <button onclick="saveSyncSettings()" class="btn btn-success"><i class="bi bi-save"></i> Save Configuration</button>
+                            <div class="card mb-4 bg-light">
+                                <div class="card-body">
+                                    <div class="section-header"><i class="bi bi-boxes"></i> Inventory</div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label class="form-label-sm">Inventory Field</label>
+                                                <select class="form-select" id="invType">
+                                                    <option value="qty_available">Quantity On Hand</option>
+                                                    <option value="virtual_available">Forecasted Quantity</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="form-check form-switch mt-4">
+                                                <input class="form-check-input" type="checkbox" id="checkZeroStock">
+                                                <label class="form-check-label">Do not sync zero stock</label>
+                                            </div>
+                                            <div class="form-check form-switch mt-2">
+                                                <input class="form-check-input" type="checkbox" id="checkCommitted">
+                                                <label class="form-check-label">Combine Committed Stock</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <label class="form-label-sm">Odoo Location IDs (Comma Separated)</label>
+                                        <input type="text" class="form-control" id="invLocations" placeholder="e.g. 8, 12">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card mb-4 bg-light">
+                                <div class="card-body">
+                                    <div class="section-header"><i class="bi bi-box"></i> Product Sync</div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="prodSyncPrice" checked>
+                                                <label class="form-check-label">Sync Price</label>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="prodSyncTitle" checked>
+                                                <label class="form-check-label">Sync Title</label>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="prodSyncDesc" checked>
+                                                <label class="form-check-label">Sync Description</label>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="prodSyncImages">
+                                                <label class="form-check-label">Sync Images (Slow)</label>
+                                            </div>
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="prodAutoCreate">
+                                                <label class="form-check-label">Create New Products in Shopify</label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="text-end sticky-bottom bg-white py-3 border-top">
+                                <button onclick="saveSyncSettings()" class="btn btn-success btn-lg px-5 shadow"><i class="bi bi-save"></i> Save Configuration</button>
                             </div>
                         </div>
                     </div> 
@@ -144,8 +212,12 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        const SHOP_URL = "{{ shop.shop_url }}"; // Injected by Jinja2
-
+        const SHOP_URL = "{{ shop.shop_url }}"; 
+        
+        // --- Load Settings on Init (You need a route for this if you want persistence display) ---
+        // For now, we assume defaults or use what jinja might inject if we expanded that.
+        // Ideally, we'd add an API endpoint: GET /api/get_settings?shop_url=...
+        
         function showToast(msg, type='primary') {
             const el = document.getElementById('liveToast');
             el.className = `toast align-items-center text-white bg-${type} border-0`;
@@ -153,11 +225,11 @@
             new bootstrap.Toast(el).show();
         }
 
-        // --- 1. Save Odoo Credentials ---
+        // --- Save Odoo Credentials ---
         document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
             e.preventDefault();
             const btn = document.getElementById('saveCredsBtn');
-            btn.disabled = true; btn.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Connecting...';
+            btn.disabled = true; btn.innerHTML = 'Connecting...';
 
             const payload = {
                 shop_url: SHOP_URL,
@@ -167,6 +239,31 @@
                 odoo_password: document.getElementById('odooPass').value
             };
 
+            postSettings(payload, btn);
+        });
+
+        // --- Save Sync Settings ---
+        function saveSyncSettings() {
+            const locsRaw = document.getElementById('invLocations').value;
+            const locs = locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [];
+
+            const payload = {
+                shop_url: SHOP_URL,
+                odoo_company_id: document.getElementById('odooCompanyId').value,
+                inventory_field: document.getElementById('invType').value,
+                sync_zero_stock: document.getElementById('checkZeroStock').checked,
+                inventory_locations: locs,
+                
+                prod_sync_price: document.getElementById('prodSyncPrice').checked,
+                prod_sync_title: document.getElementById('prodSyncTitle').checked,
+                prod_sync_desc: document.getElementById('prodSyncDesc').checked,
+                prod_sync_images: document.getElementById('prodSyncImages').checked,
+                prod_auto_create: document.getElementById('prodAutoCreate').checked
+            };
+            postSettings(payload);
+        }
+
+        function postSettings(payload, btn=null) {
             fetch('/api/save_settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -174,65 +271,41 @@
             })
             .then(r => r.json())
             .then(data => {
-                btn.disabled = false; btn.innerHTML = '<i class="bi bi-plug"></i> Save & Test Connection';
-                if(data.error) {
-                    showToast(data.error, 'danger');
-                } else {
-                    showToast("Connected to Odoo Successfully!", 'success');
-                    // Reload to unlock settings if needed
-                }
-            })
-            .catch(err => {
-                btn.disabled = false;
-                showToast("Network Error", 'danger');
+                if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
+                if(data.error) showToast(data.error, 'danger');
+                else showToast(data.message, 'success');
             });
-        });
-
-        // --- 2. Save Sync Settings ---
-        function saveSyncSettings() {
-            const payload = {
-                shop_url: SHOP_URL,
-                odoo_company_id: document.getElementById('odooCompanyId').value,
-                inventory_field: document.getElementById('invType').value,
-                sync_zero_stock: document.getElementById('checkZeroStock').checked
-            };
-
-            fetch('/api/save_settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
-            })
-            .then(r => r.json())
-            .then(data => showToast("Settings Saved!", 'success'));
         }
 
-        // --- 3. Live Logs Polling ---
+        // --- Live Logs ---
         function fetchLogs() {
             fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
             .then(r => r.json())
             .then(data => {
                 const container = document.getElementById('log-container');
-                if(data.length === 0) {
-                    container.innerHTML = '<div class="text-center text-muted mt-5">No logs yet.</div>';
-                    return;
-                }
+                if(data.length === 0) return;
+                
                 let html = '';
                 data.forEach(log => {
-                    let color = 'text-dark';
-                    if(log.message.includes('Error')) color = 'text-danger';
-                    if(log.message.includes('Success')) color = 'text-success';
-                    html += `<div class="border-bottom py-1 ${color}">
-                        <span class="text-muted small me-2">[${log.timestamp}]</span> 
+                    let cls = 'log-info';
+                    if(log.message.toLowerCase().includes('error')) cls = 'log-error';
+                    if(log.message.toLowerCase().includes('success')) cls = 'log-success';
+                    
+                    html += `<div class="log-entry ${cls}">
+                        <span style="opacity:0.6">[${log.timestamp.split('T')[1].split('.')[0]}]</span> 
                         ${log.message}
                     </div>`;
                 });
                 container.innerHTML = html;
             });
         }
-        
-        // Start polling logs
         setInterval(fetchLogs, 3000);
         fetchLogs();
+        
+        function triggerAction(url, method='GET') {
+             fetch(url + `?shop_url=${SHOP_URL}`, { method: method }) // Note: Backend needs to support shop_url in query for GET triggers
+             .then(r => showToast("Action Triggered"));
+        }
 
     </script>
 </body>
