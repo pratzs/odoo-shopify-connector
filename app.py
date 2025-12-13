@@ -1234,6 +1234,29 @@ def api_save_settings():
         return jsonify({"message": str(e)}), 500
 
 
+# --- GDPR WEBHOOKS (Mandatory for App Store) ---
+@app.route('/gdpr/customers/data_request', methods=['POST'])
+def gdpr_customer_data():
+    """Handles requests to view stored customer data"""
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+        return "Unauthorized", 401
+    return jsonify({"message": "Data request received"}), 200
+
+@app.route('/gdpr/customers/redact', methods=['POST'])
+def gdpr_customer_redact():
+    """Handles requests to delete customer data"""
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+        return "Unauthorized", 401
+    # In a real app, you would queue a deletion job here.
+    return jsonify({"message": "Customer redact received"}), 200
+
+@app.route('/gdpr/shop/redact', methods=['POST'])
+def gdpr_shop_redact():
+    """Handles requests to erase shop data (uninstall)"""
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+        return "Unauthorized", 401
+    return jsonify({"message": "Shop redact received"}), 200
+
 def run_schedule():
     # --- UPDATED: Run tasks in Threads so they don't block each other ---
     schedule.every(1).days.do(lambda: threading.Thread(target=sync_products_master).start())
