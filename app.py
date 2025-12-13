@@ -299,6 +299,8 @@ def get_settings():
         
     return jsonify(data)
 
+# --- REPLACE EXISTING 'save_settings' and 'get_settings' ROUTES IN app.py ---
+
 @app.route('/api/save_settings', methods=['POST'])
 def save_settings():
     data = request.json
@@ -308,12 +310,16 @@ def save_settings():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({'error': 'Shop not found'}), 404
     
-    # Save Shop Credentials
+    # Credentials
     if 'odoo_url' in data: shop.odoo_url = data['odoo_url']
     if 'odoo_db' in data: shop.odoo_db = data['odoo_db']
     if 'odoo_username' in data: shop.odoo_username = data['odoo_username']
     if 'odoo_company_id' in data: shop.odoo_company_id = data['odoo_company_id']
-    if data.get('odoo_password'): shop.odoo_password = data['odoo_password']
+    
+    # FIX: Only update password if user actually typed a new one (ignore empty strings)
+    new_pass = data.get('odoo_password')
+    if new_pass and new_pass.strip(): 
+        shop.odoo_password = new_pass
     
     db.session.commit()
     
@@ -328,6 +334,31 @@ def save_settings():
             set_shop_config(shop.id, key, data[key])
 
     return jsonify({'message': 'Settings Saved Successfully'})
+
+@app.route('/api/get_settings', methods=['GET'])
+def get_settings():
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return jsonify({})
+
+    data = {
+        'odoo_url': shop.odoo_url or '',
+        'odoo_db': shop.odoo_db or '',
+        'odoo_username': shop.odoo_username or '',
+        'odoo_company_id': shop.odoo_company_id or '',
+        'has_password': bool(shop.odoo_password), # Tell frontend if password exists
+        
+        # Configs - Ensure we return valid types
+        'inventory_field': get_shop_config(shop.id, 'inventory_field', 'qty_available'),
+        'inventory_locations': get_shop_config(shop.id, 'inventory_locations', []),
+        'sync_zero_stock': get_shop_config(shop.id, 'sync_zero_stock', False),
+        'prod_sync_price': get_shop_config(shop.id, 'prod_sync_price', False),
+        'prod_sync_title': get_shop_config(shop.id, 'prod_sync_title', False),
+        'prod_sync_desc': get_shop_config(shop.id, 'prod_sync_desc', False),
+        'prod_sync_images': get_shop_config(shop.id, 'prod_sync_images', False),
+        'prod_auto_create': get_shop_config(shop.id, 'prod_auto_create', False),
+    }
+    return jsonify(data)
 
 @app.route('/api/connection/test', methods=['POST'])
 def test_connection():
@@ -501,7 +532,148 @@ def fix_db_schema():
         return "Success: 'app_settings' table was recreated. You can now go back and save your settings.", 200
     except Exception as e:
         return f"Error fixing DB: {str(e)}", 500
+# --- ADD THIS NEW ROUTE TO RECEIVE SHOPIFY WEBHOOKS ---
+@app.route('/webhook/orders/updated', methods=['POST'])
+def webhook_orders():
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    data = request.get_data()
+    if not verify_webhook(data, hmac_header):
+        return "Unauthorized", 401
+    
+    # Identify shop from header
+    shop_url = request.headers.get('X-Shopify-Topic-Domain') or request.headers.get('X-Shopify-Shop-Domain')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return "Shop not found", 404
 
+    odoo = get_odoo_connection(shop)
+    if odoo:
+        # Process the order immediately
+        success, msg = process_order_data(request.json, shop, odoo)
+        log_event(shop.id, 'Webhook_Order', 'Success' if success else 'Error', msg)
+    
+    return "OK", 200
+
+# --- ADD THESE NEW CRON ROUTES ---
+
+@app.route('/api/cron/sync_inventory', methods=['GET', 'POST'])
+def cron_sync_inventory():
+    """URL for cron-job.org: Syncs stock levels every 30 mins"""
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return "Shop not found", 404
+    
+    odoo = get_odoo_connection(shop)
+    if not odoo: return "Odoo Error", 500
+    
+    # 1. Get products moved in last 40 mins
+    changed_ids = odoo.get_product_ids_with_recent_stock_moves(
+        (datetime.utcnow() - timedelta(minutes=40)).isoformat(), shop.odoo_company_id
+    )
+    
+    field = get_shop_config(shop.id, 'inventory_field', 'qty_available')
+    count = 0
+    
+    with shopify.Session.temp(shop.shop_url, '2024-01', shop.access_token):
+        location = shopify.Location.find()[0] # Use primary location
+        for pid in changed_ids:
+            # Fetch Odoo Data
+            p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [pid], {'fields': ['default_code', field]})
+            if not p_data: continue
+            
+            sku = p_data[0].get('default_code')
+            qty = int(p_data[0].get(field, 0))
+            
+            # Update Shopify
+            if sku:
+                variants = shopify.Variant.find(sku=sku)
+                if variants:
+                    shopify.InventoryLevel.set(location_id=location.id, inventory_item_id=variants[0].inventory_item_id, available=qty)
+                    count += 1
+                    
+    log_event(shop.id, 'Cron_Inventory', 'Success', f"Synced {count} items")
+    return jsonify({'synced': count})
+
+
+@app.route('/api/cron/sync_products', methods=['GET', 'POST'])
+def cron_sync_products():
+    """Syncs Product Tags, Vendor (First Word), and Type (Public Category)"""
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return "Shop not found", 404
+    
+    odoo = get_odoo_connection(shop)
+    # Check products changed in last hour
+    products = odoo.get_changed_products((datetime.utcnow() - timedelta(hours=1)).isoformat(), shop.odoo_company_id)
+    
+    with shopify.Session.temp(shop.shop_url, '2024-01', shop.access_token):
+        for pid in products:
+            # Read detailed fields including public categories and supplier info
+            data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [pid], 
+                {'fields': ['name', 'default_code', 'public_categ_ids']})
+            p = data[0]
+            sku = p.get('default_code')
+            if not sku: continue
+
+            # Logic: Vendor = First word of title
+            vendor_name = p['name'].split(' ')[0] if p['name'] else "Default"
+            
+            # Logic: Type = Odoo Public Category
+            prod_type = "General"
+            if p.get('public_categ_ids'):
+                # Helper function needed in odoo_client to get name from ID
+                prod_type = odoo.get_public_category_name(p['public_categ_ids']) or "General"
+            
+            # Logic: Vendor Product Code Metafield
+            v_code = odoo.get_vendor_product_code(p['id'])
+
+            # Find Shopify Product by SKU (via Variant)
+            variants = shopify.Variant.find(sku=sku)
+            if variants:
+                prod = shopify.Product.find(variants[0].product_id)
+                prod.vendor = vendor_name
+                prod.product_type = prod_type
+                
+                # Update Metafield
+                if v_code:
+                    prod.add_metafield(shopify.Metafield({
+                        'namespace': 'custom', 'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field'
+                    }))
+                prod.save()
+
+    return "OK"
+
+@app.route('/api/cron/sync_customers', methods=['GET', 'POST'])
+def cron_sync_customers():
+    """Syncs Customer Tags and Sales Rep Metafield"""
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return "Shop not found", 404
+    
+    odoo = get_odoo_connection(shop)
+    customers = odoo.get_changed_customers((datetime.utcnow() - timedelta(hours=1)).isoformat(), shop.odoo_company_id)
+    
+    with shopify.Session.temp(shop.shop_url, '2024-01', shop.access_token):
+        for c in customers:
+            if not c.get('email'): continue
+            
+            s_custs = shopify.Customer.search(query=f"email:{c['email']}")
+            if s_custs:
+                cust = s_custs[0]
+                
+                # Sync Tags (Odoo Category -> Shopify Tag)
+                if c.get('category_id'):
+                    tags = odoo.get_partner_category_names(c['category_id'])
+                    cust.tags = ", ".join(tags)
+                
+                # Sync Sales Rep
+                if c.get('user_id'):
+                    sales_rep = c['user_id'][1] # Name
+                    cust.add_metafield(shopify.Metafield({
+                        'namespace': 'custom', 'key': 'sales_rep', 'value': sales_rep, 'type': 'single_line_text_field'
+                    }))
+                cust.save()
+                
+    return "OK"
 
 if __name__ == '__main__':
     with app.app_context(): db.create_all()
