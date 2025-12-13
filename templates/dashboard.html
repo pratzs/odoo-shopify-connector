@@ -9,20 +9,11 @@
     <style>
         body { background-color: #f8f9fa; }
         .card { box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: none; margin-bottom: 20px; }
-        .log-frame-container {
-            height: 500px; width: 100%; border-radius: 0.375rem; overflow: hidden;
-            border: 1px solid #dee2e6; background-color: #1e1e1e; color: #00ff00;
-            font-family: monospace; padding: 15px; overflow-y: scroll; font-size: 0.9rem;
-        }
         .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; border-bottom: 1px solid #eee; padding-bottom: 0.5rem;}
         .form-label-sm { font-size: 0.85rem; font-weight: 600; color: #6c757d; }
         .badge-synced { background-color: #d1e7dd; color: #0f5132; }
         .badge-pending { background-color: #fff3cd; color: #664d03; }
         .badge-error { background-color: #f8d7da; color: #842029; }
-        .log-entry { border-bottom: 1px solid #333; padding: 2px 0; }
-        .log-success { color: #2ecc71; }
-        .log-error { color: #e74c3c; }
-        .log-info { color: #bdc3c7; }
     </style>
 </head>
 <body>
@@ -39,59 +30,29 @@
         <div class="card">
             <div class="card-header bg-white">
                 <ul class="nav nav-tabs card-header-tabs" id="mainTabs" role="tablist">
-                    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Live Logs</a></li>
-                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#orders" onclick="loadOrders()"><i class="bi bi-cart"></i> Manage Orders</a></li>
-                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Settings</a></li>
+                    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Settings</a></li>
+                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#orders"><i class="bi bi-cart"></i> Manage Orders</a></li>
+                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Logs</a></li>
                 </ul>
             </div>
             
             <div class="card-body p-0">
                 <div class="tab-content">
                     
-                    <div class="tab-pane fade show active p-3" id="live-logs">
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h6 class="m-0">System Activity</h6>
-                            <button onclick="testConnectionLog()" class="btn btn-sm btn-outline-dark">
-                                <i class="bi bi-lightning-charge-fill"></i> Test Connection & Generate Log
-                            </button>
-                        </div>
-                        <div id="log-container" class="log-frame-container">
-                            <div class="text-center text-muted mt-5">Loading logs...</div>
-                        </div>
-                    </div>
-                    
-                    <div class="tab-pane fade p-3" id="orders">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <h6 class="m-0">Last 20 Shopify Orders</h6>
-                            <button onclick="loadOrders()" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-clockwise"></i> Refresh List</button>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-hover align-middle">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th>Order</th>
-                                        <th>Date</th>
-                                        <th>Total</th>
-                                        <th>Payment</th>
-                                        <th>Sync Status</th>
-                                        <th class="text-end">Action</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="ordersTableBody">
-                                    <tr><td colspan="6" class="text-center text-muted py-4">Click Refresh to load orders</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <div class="tab-pane fade p-4" id="settings">
+                    <div class="tab-pane fade show active p-4" id="settings">
                         
                         <div class="mb-5">
-                            <div class="section-header"><i class="bi bi-database"></i> Odoo Credentials</div>
+                            <div class="d-flex justify-content-between">
+                                <div class="section-header"><i class="bi bi-database"></i> Odoo Credentials</div>
+                                <button onclick="checkConnection()" class="btn btn-sm btn-outline-success h-50">
+                                    <i class="bi bi-heart-pulse"></i> Check Health
+                                </button>
+                            </div>
+                            
                             <form id="odooCredsForm">
                                 <div class="row g-3">
                                     <div class="col-md-6">
-                                        <label class="form-label-sm">Odoo URL (No slash at end)</label>
+                                        <label class="form-label-sm">Odoo URL</label>
                                         <input type="text" class="form-control" id="odooUrl" placeholder="https://odoo.mycompany.com">
                                     </div>
                                     <div class="col-md-6">
@@ -104,11 +65,11 @@
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label-sm">Password / API Key</label>
-                                        <input type="password" class="form-control" id="odooPass" placeholder="(Hidden for security)">
+                                        <input type="password" class="form-control" id="odooPass" placeholder="(Hidden)">
                                     </div>
-                                    <div class="col-12">
-                                        <button type="submit" class="btn btn-primary w-100" id="saveCredsBtn">
-                                            <i class="bi bi-save"></i> Save Settings & Test Connection
+                                    <div class="col-12 text-end">
+                                        <button type="submit" class="btn btn-primary" id="saveCredsBtn">
+                                            <i class="bi bi-save"></i> Save All Settings
                                         </button>
                                     </div>
                                 </div>
@@ -130,7 +91,7 @@
                                     </select>
                                 </div>
                                 <div class="mb-3">
-                                    <label class="form-label-sm">Location IDs (Comma separated)</label>
+                                    <label class="form-label-sm">Location IDs (comma separated)</label>
                                     <input type="text" class="form-control" id="invLocations">
                                 </div>
                                 <div class="form-check form-switch mb-3">
@@ -148,8 +109,36 @@
                                 <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodAutoCreate"><label class="form-check-label">Create New Products in Shopify</label></div>
                             </div>
                         </div>
-
                     </div> 
+
+                    <div class="tab-pane fade p-3" id="orders">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6 class="m-0">Last 20 Shopify Orders</h6>
+                            <button onclick="loadOrders()" class="btn btn-sm btn-primary"><i class="bi bi-arrow-clockwise"></i> Fetch Recent Orders</button>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Order</th>
+                                        <th>Date</th>
+                                        <th>Total</th>
+                                        <th>Payment</th>
+                                        <th>Sync Status</th>
+                                        <th class="text-end">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ordersTableBody">
+                                    <tr><td colspan="6" class="text-center text-muted py-4">Click "Fetch" to load orders</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="tab-pane fade p-3" id="live-logs">
+                        <iframe src="/templates/live_logs.html" style="width:100%; height:500px; border:none;"></iframe>
+                    </div>
+
                 </div>
             </div>
         </div>
@@ -172,25 +161,28 @@
             new bootstrap.Toast(el).show();
         }
 
-        // --- 1. LOAD SETTINGS ON START ---
+        // --- 1. LOAD SETTINGS ---
         function loadSettings() {
             fetch(`/api/get_settings?shop_url=${SHOP_URL}`)
             .then(r => r.json())
             .then(data => {
+                // Credentials
                 if(data.odoo_url) document.getElementById('odooUrl').value = data.odoo_url;
                 if(data.odoo_db) document.getElementById('odooDb').value = data.odoo_db;
                 if(data.odoo_username) document.getElementById('odooUser').value = data.odoo_username;
                 if(data.odoo_company_id) document.getElementById('odooCompanyId').value = data.odoo_company_id;
                 
+                // Configs
                 if(data.inventory_field) document.getElementById('invType').value = data.inventory_field;
                 if(data.inventory_locations) document.getElementById('invLocations').value = data.inventory_locations;
-                document.getElementById('checkZeroStock').checked = data.sync_zero_stock || false;
-
-                document.getElementById('prodSyncPrice').checked = data.prod_sync_price || false;
-                document.getElementById('prodSyncTitle').checked = data.prod_sync_title || false;
-                document.getElementById('prodSyncDesc').checked = data.prod_sync_desc || false;
-                document.getElementById('prodSyncImages').checked = data.prod_sync_images || false;
-                document.getElementById('prodAutoCreate').checked = data.prod_auto_create || false;
+                
+                // Toggles (Ensure boolean handling)
+                document.getElementById('checkZeroStock').checked = data.sync_zero_stock === true || data.sync_zero_stock === 'true';
+                document.getElementById('prodSyncPrice').checked = data.prod_sync_price === true;
+                document.getElementById('prodSyncTitle').checked = data.prod_sync_title === true;
+                document.getElementById('prodSyncDesc').checked = data.prod_sync_desc === true;
+                document.getElementById('prodSyncImages').checked = data.prod_sync_images === true;
+                document.getElementById('prodAutoCreate').checked = data.prod_auto_create === true;
             });
         }
         
@@ -199,27 +191,24 @@
         // --- 2. SAVE SETTINGS ---
         document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            submitSettings();
-        });
-
-        function submitSettings() {
             const btn = document.getElementById('saveCredsBtn');
             const originalText = btn.innerHTML;
-            btn.disabled = true; btn.innerHTML = 'Testing Connection...';
+            btn.disabled = true; btn.innerHTML = 'Saving...';
 
             const locsRaw = document.getElementById('invLocations').value;
+            
             const payload = {
                 shop_url: SHOP_URL,
+                // Creds
                 odoo_url: document.getElementById('odooUrl').value,
                 odoo_db: document.getElementById('odooDb').value,
                 odoo_username: document.getElementById('odooUser').value,
                 odoo_password: document.getElementById('odooPass').value,
                 odoo_company_id: document.getElementById('odooCompanyId').value,
-                
+                // Configs
                 inventory_field: document.getElementById('invType').value,
                 inventory_locations: locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [],
                 sync_zero_stock: document.getElementById('checkZeroStock').checked,
-                
                 prod_sync_price: document.getElementById('prodSyncPrice').checked,
                 prod_sync_title: document.getElementById('prodSyncTitle').checked,
                 prod_sync_desc: document.getElementById('prodSyncDesc').checked,
@@ -236,24 +225,31 @@
             .then(data => {
                 btn.disabled = false; btn.innerHTML = originalText;
                 if(data.error) showToast(data.error, 'danger');
-                else {
-                    showToast(data.message, 'success');
-                    fetchLogs(); // Refresh logs immediately
-                }
+                else showToast(data.message, 'success');
             })
             .catch(err => {
                 btn.disabled = false; btn.innerHTML = originalText;
                 showToast("Network Error", 'danger');
             });
+        });
+
+        // --- 3. HEALTH CHECK ---
+        function checkConnection() {
+            showToast("Pinging Odoo...", "primary");
+            fetch('/api/connection/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ shop_url: SHOP_URL })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if(data.status === 'ok') showToast(data.message, 'success');
+                else showToast("Failed: " + data.error, 'danger');
+            })
+            .catch(e => showToast("Connection Error", 'danger'));
         }
 
-        // --- TEST BUTTON ACTION ---
-        function testConnectionLog() {
-            // Re-uses the submit logic to force a connection test log
-            submitSettings();
-        }
-
-        // --- 3. FETCH ORDERS ---
+        // --- 4. FETCH ORDERS ---
         function loadOrders() {
             const tbody = document.getElementById('ordersTableBody');
             tbody.innerHTML = '<tr><td colspan="6" class="text-center">Loading from Shopify...</td></tr>';
@@ -292,7 +288,6 @@
             });
         }
 
-        // --- 4. MANUAL SYNC SINGLE ORDER ---
         function syncOrder(orderId) {
             showToast("Syncing Order...", 'primary');
             fetch('/api/orders/sync', {
@@ -305,42 +300,10 @@
                 if(data.error) showToast(data.error, 'danger');
                 else {
                     showToast(data.message, 'success');
-                    fetchLogs(); 
-                    loadOrders(); 
+                    loadOrders(); // Refresh status
                 }
             });
         }
-
-        // --- 5. LOGS ---
-        function fetchLogs() {
-            const container = document.getElementById('log-container');
-            fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
-            .then(r => r.json())
-            .then(data => {
-                if(data.length === 0) {
-                    container.innerHTML = '<div class="text-center text-muted mt-5">-- No logs found. Click "Test Connection" to check system. --</div>';
-                    return;
-                }
-                let html = '';
-                data.forEach(log => {
-                    let cls = 'log-info';
-                    if(log.message.includes('Success')) cls = 'log-success';
-                    if(log.message.includes('Error') || log.message.includes('Failed')) cls = 'log-error';
-                    
-                    // Safe timestamp parsing
-                    let timeStr = log.timestamp;
-                    try { timeStr = log.timestamp.split('T')[1].split('.')[0]; } catch(e){}
-
-                    html += `<div class="log-entry ${cls}">
-                        <span style="opacity:0.5">[${timeStr}]</span> ${log.message}
-                    </div>`;
-                });
-                container.innerHTML = html;
-            });
-        }
-
-        setInterval(fetchLogs, 5000);
-        fetchLogs();
     </script>
 </body>
 </html>
