@@ -373,6 +373,18 @@ def run_schedule():
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
+
+# --- TEMPORARY SETUP ROUTE ---
+@app.route('/init_db')
+def init_db():
+    try:
+        with app.app_context():
+            db.create_all()
+        return "<h1>Success! Database Tables Created.</h1><p>You can now install the app.</p>", 200
+    except Exception as e:
+        return f"<h1>Error:</h1><p>{str(e)}</p>", 500
+
+
 if __name__ == '__main__':
     with app.app_context(): db.create_all()
     app.run(debug=True)
