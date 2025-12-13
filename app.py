@@ -335,30 +335,6 @@ def save_settings():
 
     return jsonify({'message': 'Settings Saved Successfully'})
 
-@app.route('/api/get_settings', methods=['GET'])
-def get_settings():
-    shop_url = request.args.get('shop_url')
-    shop = Shop.query.filter_by(shop_url=shop_url).first()
-    if not shop: return jsonify({})
-
-    data = {
-        'odoo_url': shop.odoo_url or '',
-        'odoo_db': shop.odoo_db or '',
-        'odoo_username': shop.odoo_username or '',
-        'odoo_company_id': shop.odoo_company_id or '',
-        'has_password': bool(shop.odoo_password), # Tell frontend if password exists
-        
-        # Configs - Ensure we return valid types
-        'inventory_field': get_shop_config(shop.id, 'inventory_field', 'qty_available'),
-        'inventory_locations': get_shop_config(shop.id, 'inventory_locations', []),
-        'sync_zero_stock': get_shop_config(shop.id, 'sync_zero_stock', False),
-        'prod_sync_price': get_shop_config(shop.id, 'prod_sync_price', False),
-        'prod_sync_title': get_shop_config(shop.id, 'prod_sync_title', False),
-        'prod_sync_desc': get_shop_config(shop.id, 'prod_sync_desc', False),
-        'prod_sync_images': get_shop_config(shop.id, 'prod_sync_images', False),
-        'prod_auto_create': get_shop_config(shop.id, 'prod_auto_create', False),
-    }
-    return jsonify(data)
 
 @app.route('/api/connection/test', methods=['POST'])
 def test_connection():
