@@ -19,6 +19,10 @@
         .badge-synced { background-color: #d1e7dd; color: #0f5132; }
         .badge-pending { background-color: #fff3cd; color: #664d03; }
         .badge-error { background-color: #f8d7da; color: #842029; }
+        .log-entry { border-bottom: 1px solid #333; padding: 2px 0; }
+        .log-success { color: #2ecc71; }
+        .log-error { color: #e74c3c; }
+        .log-info { color: #bdc3c7; }
     </style>
 </head>
 <body>
@@ -35,7 +39,7 @@
         <div class="card">
             <div class="card-header bg-white">
                 <ul class="nav nav-tabs card-header-tabs" id="mainTabs" role="tablist">
-                    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Logs</a></li>
+                    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Live Logs</a></li>
                     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#orders" onclick="loadOrders()"><i class="bi bi-cart"></i> Manage Orders</a></li>
                     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Settings</a></li>
                 </ul>
@@ -45,6 +49,12 @@
                 <div class="tab-content">
                     
                     <div class="tab-pane fade show active p-3" id="live-logs">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="m-0">System Activity</h6>
+                            <button onclick="testConnectionLog()" class="btn btn-sm btn-outline-dark">
+                                <i class="bi bi-lightning-charge-fill"></i> Test Connection & Generate Log
+                            </button>
+                        </div>
                         <div id="log-container" class="log-frame-container">
                             <div class="text-center text-muted mt-5">Loading logs...</div>
                         </div>
@@ -167,18 +177,15 @@
             fetch(`/api/get_settings?shop_url=${SHOP_URL}`)
             .then(r => r.json())
             .then(data => {
-                // Populate Fields
                 if(data.odoo_url) document.getElementById('odooUrl').value = data.odoo_url;
                 if(data.odoo_db) document.getElementById('odooDb').value = data.odoo_db;
                 if(data.odoo_username) document.getElementById('odooUser').value = data.odoo_username;
                 if(data.odoo_company_id) document.getElementById('odooCompanyId').value = data.odoo_company_id;
                 
-                // Inventory
                 if(data.inventory_field) document.getElementById('invType').value = data.inventory_field;
                 if(data.inventory_locations) document.getElementById('invLocations').value = data.inventory_locations;
                 document.getElementById('checkZeroStock').checked = data.sync_zero_stock || false;
 
-                // Products
                 document.getElementById('prodSyncPrice').checked = data.prod_sync_price || false;
                 document.getElementById('prodSyncTitle').checked = data.prod_sync_title || false;
                 document.getElementById('prodSyncDesc').checked = data.prod_sync_desc || false;
@@ -187,24 +194,26 @@
             });
         }
         
-        // Call immediately
         loadSettings();
 
         // --- 2. SAVE SETTINGS ---
         document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
             e.preventDefault();
+            submitSettings();
+        });
+
+        function submitSettings() {
             const btn = document.getElementById('saveCredsBtn');
             const originalText = btn.innerHTML;
-            btn.disabled = true; btn.innerHTML = 'Saving & Testing...';
+            btn.disabled = true; btn.innerHTML = 'Testing Connection...';
 
-            // Gather all data (Creds + Settings)
             const locsRaw = document.getElementById('invLocations').value;
             const payload = {
                 shop_url: SHOP_URL,
                 odoo_url: document.getElementById('odooUrl').value,
                 odoo_db: document.getElementById('odooDb').value,
                 odoo_username: document.getElementById('odooUser').value,
-                odoo_password: document.getElementById('odooPass').value, // Only sends if user typed it
+                odoo_password: document.getElementById('odooPass').value,
                 odoo_company_id: document.getElementById('odooCompanyId').value,
                 
                 inventory_field: document.getElementById('invType').value,
@@ -229,14 +238,20 @@
                 if(data.error) showToast(data.error, 'danger');
                 else {
                     showToast(data.message, 'success');
-                    fetchLogs(); // Refresh logs to see connection result
+                    fetchLogs(); // Refresh logs immediately
                 }
             })
             .catch(err => {
                 btn.disabled = false; btn.innerHTML = originalText;
                 showToast("Network Error", 'danger');
             });
-        });
+        }
+
+        // --- TEST BUTTON ACTION ---
+        function testConnectionLog() {
+            // Re-uses the submit logic to force a connection test log
+            submitSettings();
+        }
 
         // --- 3. FETCH ORDERS ---
         function loadOrders() {
@@ -290,8 +305,8 @@
                 if(data.error) showToast(data.error, 'danger');
                 else {
                     showToast(data.message, 'success');
-                    fetchLogs(); // See the result in logs
-                    loadOrders(); // Refresh table status
+                    fetchLogs(); 
+                    loadOrders(); 
                 }
             });
         }
@@ -303,15 +318,22 @@
             .then(r => r.json())
             .then(data => {
                 if(data.length === 0) {
-                    container.innerHTML = '<div style="color: #555; text-align: center; margin-top: 50px;">-- No logs yet --</div>';
+                    container.innerHTML = '<div class="text-center text-muted mt-5">-- No logs found. Click "Test Connection" to check system. --</div>';
                     return;
                 }
                 let html = '';
                 data.forEach(log => {
-                    let color = '#ccc';
-                    if(log.message.includes('Success')) color = '#0f0';
-                    if(log.message.includes('Error')) color = '#f55';
-                    html += `<div style="border-bottom: 1px solid #333; padding: 2px 0; color: ${color}">[${log.timestamp.split('T')[1].split('.')[0]}] ${log.message}</div>`;
+                    let cls = 'log-info';
+                    if(log.message.includes('Success')) cls = 'log-success';
+                    if(log.message.includes('Error') || log.message.includes('Failed')) cls = 'log-error';
+                    
+                    // Safe timestamp parsing
+                    let timeStr = log.timestamp;
+                    try { timeStr = log.timestamp.split('T')[1].split('.')[0]; } catch(e){}
+
+                    html += `<div class="log-entry ${cls}">
+                        <span style="opacity:0.5">[${timeStr}]</span> ${log.message}
+                    </div>`;
                 });
                 container.innerHTML = html;
             });
