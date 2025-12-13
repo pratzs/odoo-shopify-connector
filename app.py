@@ -7,18 +7,41 @@ import threading
 import schedule
 import time
 import shopify
+import shopify.api_access
+import shopify.session
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, Shop
 from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 
+# --- CRITICAL FIX: FORCE SHOPIFY TO ACCEPT NEW SCOPES ---
+# This must run BEFORE any other Shopify setup!
+class PermissiveApiAccess(shopify.api_access.ApiAccess):
+    def __init__(self, scopes):
+        # Allow any scopes string or list without validation
+        if isinstance(scopes, str):
+            self._scopes = set(scope.strip() for scope in scopes.split(","))
+        else:
+            self._scopes = set(scopes)
+
+    def __iter__(self):
+        return iter(self._scopes)
+
+    def __str__(self):
+        return ", ".join(self._scopes)
+
+# Apply patch to BOTH modules to ensure it works
+shopify.api_access.ApiAccess = PermissiveApiAccess
+shopify.session.ApiAccess = PermissiveApiAccess
+# --------------------------------------------------------
+
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 # --- PUBLIC APP CONFIG ---
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
-SHOPIFY_SECRET = os.getenv('SHOPIFY_SECRET')
+SHOPIFY_SECRET = os.getenv('SHOPIFY_SECRET') # Ensure this matches Partners Dashboard Client Secret
 APP_URL = os.getenv('APP_URL')
 
 # --- DATABASE CONFIG ---
@@ -30,11 +53,15 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
+
+# Initialize Shopify Session AFTER the patch
 shopify.Session.setup(api_key=SHOPIFY_API_KEY, secret=SHOPIFY_SECRET)
 
 # --- GLOBAL LOCKS ---
 order_processing_lock = threading.Lock()
 active_processing_ids = set()
+
+# ... (The rest of your code: helpers, routes, etc. remains the same) ...
 
 
 # --- CRITICAL FIX: Disable Strict Scope Validation ---
