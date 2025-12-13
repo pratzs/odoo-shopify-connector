@@ -459,9 +459,16 @@ def callback():
 @app.route('/api/save_settings', methods=['POST'])
 def save_settings():
     data = request.json
-    shop = Shop.query.filter_by(shop_url=data.get('shop_url')).first()
+    # Fallback: check session if shop_url not in body
+    shop_url = data.get('shop_url')
+    
+    if not shop_url:
+        return jsonify({'error': 'Missing shop_url'}), 400
+
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({'error': 'Shop not found'}), 404
     
+    # Save Odoo Creds
     if 'odoo_url' in data:
         shop.odoo_url = data['odoo_url']
         shop.odoo_db = data['odoo_db']
@@ -470,22 +477,41 @@ def save_settings():
         shop.odoo_company_id = data.get('odoo_company_id')
         db.session.commit()
     
-    for key in ['inventory_field', 'sync_zero_stock', 'inventory_locations', 'shopify_location_id', 
-                'prod_sync_title', 'prod_sync_desc', 'prod_sync_price']:
+    # Save generic settings
+    # We iterate ALL keys sent by the frontend to ensure nothing is missed
+    allowed_keys = [
+        'inventory_field', 'sync_zero_stock', 'combine_committed', 'inventory_locations', 
+        'shopify_location_id', 'prod_auto_create', 'prod_auto_publish', 
+        'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
+        'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 
+        'prod_sync_type', 'prod_sync_vendor', 'order_sync_tax',
+        'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 
+        'cust_whitelist_tags', 'cust_blacklist_tags'
+    ]
+    
+    for key in allowed_keys:
         if key in data: set_shop_config(shop.id, key, data[key])
 
-    try:
-        OdooClient(shop.odoo_url, shop.odoo_db, shop.odoo_username, shop.odoo_password)
-        return jsonify({'message': 'Connected Successfully'})
-    except Exception as e:
-        return jsonify({'error': f'Connection Failed: {str(e)}'}), 400
+    # Test Connection if credentials provided
+    if 'odoo_password' in data:
+        try:
+            OdooClient(shop.odoo_url, shop.odoo_db, shop.odoo_username, shop.odoo_password)
+            return jsonify({'message': 'Connected Successfully'})
+        except Exception as e:
+            return jsonify({'error': f'Connection Failed: {str(e)}'}), 400
+            
+    return jsonify({'message': 'Configuration Saved'})
 
 @app.route('/api/logs/live', methods=['GET'])
 def api_live_logs():
-    shop = Shop.query.filter_by(shop_url=request.args.get('shop_url')).first()
+    shop_url = request.args.get('shop_url')
+    if not shop_url: return jsonify([])
+    
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify([])
-    logs = SyncLog.query.filter_by(shop_id=shop.id).order_by(SyncLog.timestamp.desc()).limit(50).all()
-    return jsonify([{'id': l.id, 'timestamp': l.timestamp.isoformat(), 'message': f"[{l.entity}] {l.message}", 'type': 'info'} for l in logs])
+    
+    logs = SyncLog.query.filter_by(shop_id=shop.id).order_by(SyncLog.id.desc()).limit(50).all()
+    return jsonify([{'id': l.id, 'timestamp': l.timestamp.isoformat(), 'message': f"[{l.entity}] {l.message}", 'status': l.status} for l in logs])
 
 @app.route('/webhook/orders/updated', methods=['POST'])
 def webhook_orders():
