@@ -50,11 +50,14 @@ shopify.Session.setup(api_key=SHOPIFY_API_KEY, secret=SHOPIFY_SECRET)
 
 # --- HELPERS ---
 def get_shop_config(shop_id, key, default=None):
-    with app.app_context():
+    # Removed 'with app.app_context():' as it is not needed inside routes
+    try:
         setting = AppSetting.query.filter_by(shop_id=shop_id, key=key).first()
         if not setting: return default
         try: return json.loads(setting.value)
         except: return setting.value
+    except Exception:
+        return default
 
 def set_shop_config(shop_id, key, value):
     try:
