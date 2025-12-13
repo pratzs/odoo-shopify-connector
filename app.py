@@ -882,7 +882,6 @@ def archive_shopify_duplicates():
     for sku, products in sku_map.items():
         if len(products) > 1:
             # Sort by created_at (keep the newest)
-            # Format: 2024-10-05T12:00:00-04:00
             products.sort(key=lambda x: x.created_at, reverse=True)
             
             # Keep the first one (index 0), archive the rest
@@ -976,6 +975,7 @@ def cleanup_shopify_products(odoo_active_skus):
             else: break
     except: pass
     if archived_count > 0: log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} products.")
+
 def perform_inventory_sync(lookback_minutes):
     """Checks Odoo for recent stock moves and updates Shopify."""
     if not odoo or not setup_shopify_session(): return 0, 0
@@ -1020,7 +1020,6 @@ def perform_inventory_sync(lookback_minutes):
             except Exception as e: print(f"Inv Error {sku}: {e}")
         count += 1
     return count, updates
-
 
 def scheduled_inventory_sync():
     with app.app_context():
@@ -1232,7 +1231,6 @@ def api_save_settings():
         return jsonify({"message": "Saved"})
     except Exception as e:
         return jsonify({"message": str(e)}), 500
-
 
 # --- GDPR WEBHOOKS (Mandatory for App Store) ---
 @app.route('/gdpr/customers/data_request', methods=['POST'])
