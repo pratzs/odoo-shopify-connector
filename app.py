@@ -437,6 +437,25 @@ def callback():
     db.session.commit()
     return redirect(url_for('index', shop=shop_url))
 
+
+from sqlalchemy import text  # Make sure to import 'text'
+
+@app.route('/fix_db_schema')
+def fix_db_schema():
+    try:
+        with app.app_context():
+            # 1. Drop the table that has the wrong schema
+            db.session.execute(text('DROP TABLE IF EXISTS app_settings CASCADE'))
+            db.session.commit()
+            
+            # 2. Recreate it with the correct columns (including 'id')
+            db.create_all()
+            
+        return "Success: 'app_settings' table was recreated. You can now go back and save your settings.", 200
+    except Exception as e:
+        return f"Error fixing DB: {str(e)}", 500
+
+
 if __name__ == '__main__':
     with app.app_context(): db.create_all()
     app.run(debug=True)
