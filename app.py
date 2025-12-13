@@ -148,6 +148,132 @@ def get_shopify_variant_inv_by_sku(sku):
     except: pass
     return None
 
+# --- NEW ROUTES FOR SETTINGS & ORDERS ---
+
+@app.route('/api/get_settings', methods=['GET'])
+def get_settings():
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return jsonify({})
+
+    # Load all settings into a dictionary
+    keys = [
+        'odoo_company_id', 'inventory_field', 'sync_zero_stock', 'inventory_locations', 
+        'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 
+        'prod_sync_images', 'prod_auto_create'
+    ]
+    data = {
+        'odoo_url': shop.odoo_url,
+        'odoo_db': shop.odoo_db,
+        'odoo_username': shop.odoo_username,
+        # Do not send password back for security, just a flag if it exists
+        'has_password': bool(shop.odoo_password) 
+    }
+    
+    for k in keys:
+        val = get_shop_config(shop.id, k)
+        if val is not None: data[k] = val
+        
+    return jsonify(data)
+
+@app.route('/api/orders/recent', methods=['GET'])
+def get_recent_orders():
+    shop_url = request.args.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return jsonify([])
+
+    orders_data = []
+    try:
+        with shopify.Session.temp(shop.shop_url, '2024-01', shop.access_token):
+            # Fetch last 20 orders from Shopify
+            orders = shopify.Order.find(limit=20, status='any', order="created_at DESC")
+            
+            for o in orders:
+                # Check our SyncLog to see if we processed this ID recently
+                # Note: This is a loose check. For strict status, we'd query Odoo, but that's slow.
+                log = SyncLog.query.filter(SyncLog.shop_id == shop.id, SyncLog.message.contains(o.name)).first()
+                status = 'Synced' if log and 'Success' in log.status else 'Pending'
+                if log and 'Error' in log.status: status = 'Error'
+                
+                orders_data.append({
+                    'id': o.id,
+                    'name': o.name,
+                    'created_at': o.created_at,
+                    'total': o.total_price,
+                    'financial_status': o.financial_status,
+                    'sync_status': status
+                })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify(orders_data)
+
+@app.route('/api/orders/sync', methods=['POST'])
+def manual_sync_order():
+    shop_url = request.json.get('shop_url')
+    order_id = request.json.get('order_id')
+    
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return jsonify({'error': 'Shop not found'}), 404
+
+    try:
+        odoo = get_odoo_connection(shop)
+        if not odoo: return jsonify({'error': 'Cannot connect to Odoo'}), 400
+
+        with shopify.Session.temp(shop.shop_url, '2024-01', shop.access_token):
+            order = shopify.Order.find(order_id)
+            if not order: return jsonify({'error': 'Order not found in Shopify'}), 404
+            
+            # Convert ShopifyResource to Dict for our processor
+            order_data = order.to_dict()
+            
+            # Reuse the existing processor (Duplicate check is built-in there)
+            success = process_order_data(order_data, shop, odoo)
+            
+            if success:
+                return jsonify({'message': f'Order {order.name} synced successfully'})
+            else:
+                return jsonify({'error': 'Sync failed (Check logs)'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# UPDATE save_settings TO LOG EVENTS
+@app.route('/api/save_settings', methods=['POST'])
+def save_settings():
+    data = request.json
+    shop_url = data.get('shop_url')
+    if not shop_url: return jsonify({'error': 'Missing shop_url'}), 400
+
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop: return jsonify({'error': 'Shop not found'}), 404
+    
+    if 'odoo_url' in data:
+        shop.odoo_url = data['odoo_url']
+        shop.odoo_db = data['odoo_db']
+        shop.odoo_username = data['odoo_username']
+        if data.get('odoo_password'): # Only update if provided
+            shop.odoo_password = data['odoo_password']
+        shop.odoo_company_id = data.get('odoo_company_id')
+        db.session.commit()
+    
+    keys = ['inventory_field', 'sync_zero_stock', 'inventory_locations', 'prod_sync_price', 
+            'prod_sync_title', 'prod_sync_desc', 'prod_sync_images', 'prod_auto_create']
+    for key in keys:
+        if key in data: set_shop_config(shop.id, key, data[key])
+
+    # Test & Log Connection
+    if 'odoo_username' in data: # Try connecting if creds were touched
+        try:
+            odoo = OdooClient(shop.odoo_url, shop.odoo_db, shop.odoo_username, shop.odoo_password)
+            # LOG THE SUCCESS so it shows in the black box
+            log_event(shop.id, 'Connection', 'Success', 'Odoo Connection Verified') 
+            return jsonify({'message': 'Settings Saved & Connection Verified'})
+        except Exception as e:
+            log_event(shop.id, 'Connection', 'Error', f'Connection Failed: {str(e)}')
+            return jsonify({'error': f'Settings Saved but Connection Failed: {str(e)}'}), 400
+            
+    return jsonify({'message': 'Settings Saved'})
+
 # --- CORE LOGIC: ORDERS ---
 def process_order_data(data, shop, odoo):
     shopify_id = str(data.get('id', ''))
