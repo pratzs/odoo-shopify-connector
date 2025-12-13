@@ -223,8 +223,17 @@ def process_order_data(data, shop, odoo):
             return False, "No valid lines found (Check SKUs)"
 
         # 6. Payment Method in Notes
-        gateway = data.get('gateway', 'Unknown')
-        note = f"Shopify Order: {shopify_name}\nPayment Method: {gateway}"
+        # Check the modern list field first, then fallback to the old field
+        payment_methods = data.get('payment_gateway_names')
+        
+        if payment_methods and isinstance(payment_methods, list):
+            # Join them nicely (e.g. "Stripe, Gift Card")
+            gateway_str = ", ".join([str(m).title() for m in payment_methods])
+        else:
+            # Fallback to legacy 'gateway' field
+            gateway_str = data.get('gateway') or 'Unknown'
+
+        note = f"Shopify Order: {shopify_name}\nPayment Method: {gateway_str}"
         
         vals = {
             'partner_id': partner_id, 
