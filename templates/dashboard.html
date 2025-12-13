@@ -212,101 +212,124 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        const SHOP_URL = "{{ shop.shop_url }}"; 
-        
-        // --- Load Settings on Init (You need a route for this if you want persistence display) ---
-        // For now, we assume defaults or use what jinja might inject if we expanded that.
-        // Ideally, we'd add an API endpoint: GET /api/get_settings?shop_url=...
-        
-        function showToast(msg, type='primary') {
-            const el = document.getElementById('liveToast');
-            el.className = `toast align-items-center text-white bg-${type} border-0`;
-            document.getElementById('toastMessage').innerText = msg;
-            new bootstrap.Toast(el).show();
-        }
+    const SHOP_URL = "{{ shop.shop_url }}"; 
+    
+    function showToast(msg, type='primary') {
+        const el = document.getElementById('liveToast');
+        el.className = `toast align-items-center text-white bg-${type} border-0`;
+        document.getElementById('toastMessage').innerText = msg;
+        new bootstrap.Toast(el).show();
+    }
 
-        // --- Save Odoo Credentials ---
-        document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const btn = document.getElementById('saveCredsBtn');
-            btn.disabled = true; btn.innerHTML = 'Connecting...';
+    // --- Save Odoo Credentials ---
+    document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const btn = document.getElementById('saveCredsBtn');
+        btn.disabled = true; btn.innerHTML = 'Connecting...';
 
-            const payload = {
-                shop_url: SHOP_URL,
-                odoo_url: document.getElementById('odooUrl').value,
-                odoo_db: document.getElementById('odooDb').value,
-                odoo_username: document.getElementById('odooUser').value,
-                odoo_password: document.getElementById('odooPass').value
-            };
+        const payload = {
+            shop_url: SHOP_URL,
+            odoo_url: document.getElementById('odooUrl').value,
+            odoo_db: document.getElementById('odooDb').value,
+            odoo_username: document.getElementById('odooUser').value,
+            odoo_password: document.getElementById('odooPass').value
+        };
 
-            postSettings(payload, btn);
+        postSettings(payload, btn);
+    });
+
+    // --- Save Sync Settings ---
+    function saveSyncSettings() {
+        const locsRaw = document.getElementById('invLocations').value;
+        const locs = locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [];
+
+        const payload = {
+            shop_url: SHOP_URL,
+            odoo_company_id: document.getElementById('odooCompanyId').value,
+            inventory_field: document.getElementById('invType').value,
+            sync_zero_stock: document.getElementById('checkZeroStock').checked,
+            inventory_locations: locs,
+            
+            prod_sync_price: document.getElementById('prodSyncPrice').checked,
+            prod_sync_title: document.getElementById('prodSyncTitle').checked,
+            prod_sync_desc: document.getElementById('prodSyncDesc').checked,
+            prod_sync_images: document.getElementById('prodSyncImages').checked,
+            prod_auto_create: document.getElementById('prodAutoCreate').checked
+        };
+        postSettings(payload);
+    }
+
+    function postSettings(payload, btn=null) {
+        fetch('/api/save_settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        })
+        .then(r => r.json())
+        .then(data => {
+            if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
+            if(data.error) showToast(data.error, 'danger');
+            else {
+                showToast(data.message, 'success');
+                fetchLogs(); // Refresh logs immediately after saving
+            }
+        })
+        .catch(err => {
+            if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
+            showToast("Network Error: " + err, 'danger');
         });
+    }
 
-        // --- Save Sync Settings ---
-        function saveSyncSettings() {
-            const locsRaw = document.getElementById('invLocations').value;
-            const locs = locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [];
-
-            const payload = {
-                shop_url: SHOP_URL,
-                odoo_company_id: document.getElementById('odooCompanyId').value,
-                inventory_field: document.getElementById('invType').value,
-                sync_zero_stock: document.getElementById('checkZeroStock').checked,
-                inventory_locations: locs,
-                
-                prod_sync_price: document.getElementById('prodSyncPrice').checked,
-                prod_sync_title: document.getElementById('prodSyncTitle').checked,
-                prod_sync_desc: document.getElementById('prodSyncDesc').checked,
-                prod_sync_images: document.getElementById('prodSyncImages').checked,
-                prod_auto_create: document.getElementById('prodAutoCreate').checked
-            };
-            postSettings(payload);
-        }
-
-        function postSettings(payload, btn=null) {
-            fetch('/api/save_settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
-            })
-            .then(r => r.json())
-            .then(data => {
-                if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
-                if(data.error) showToast(data.error, 'danger');
-                else showToast(data.message, 'success');
-            });
-        }
-
-        // --- Live Logs ---
-        function fetchLogs() {
-            fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
-            .then(r => r.json())
-            .then(data => {
-                const container = document.getElementById('log-container');
-                if(data.length === 0) return;
-                
-                let html = '';
-                data.forEach(log => {
-                    let cls = 'log-info';
-                    if(log.message.toLowerCase().includes('error')) cls = 'log-error';
-                    if(log.message.toLowerCase().includes('success')) cls = 'log-success';
-                    
-                    html += `<div class="log-entry ${cls}">
-                        <span style="opacity:0.6">[${log.timestamp.split('T')[1].split('.')[0]}]</span> 
-                        ${log.message}
-                    </div>`;
-                });
-                container.innerHTML = html;
-            });
-        }
-        setInterval(fetchLogs, 3000);
-        fetchLogs();
+    // --- Live Logs (Updated for Visibility) ---
+    function fetchLogs() {
+        const container = document.getElementById('log-container');
         
-        function triggerAction(url, method='GET') {
-             fetch(url + `?shop_url=${SHOP_URL}`, { method: method }) // Note: Backend needs to support shop_url in query for GET triggers
-             .then(r => showToast("Action Triggered"));
-        }
+        fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            if(data.length === 0) {
+                container.innerHTML = '<div style="color: #555; text-align: center; margin-top: 20px;">-- No logs found. Click "Save & Test Connection" to generate one. --</div>';
+                return;
+            }
+            
+            let html = '';
+            data.forEach(log => {
+                let color = '#cccccc'; // Default Info (Gray/White)
+                if(log.message.toLowerCase().includes('error')) color = '#ff4d4d'; // Red
+                if(log.message.toLowerCase().includes('success')) color = '#00ff00'; // Green
+                if(log.message.toLowerCase().includes('connected')) color = '#00ff00'; // Green
+                
+                // Format timestamp safely
+                let timeStr = log.timestamp;
+                try { timeStr = log.timestamp.split('T')[1].split('.')[0]; } catch(e){}
 
-    </script>
+                html += `<div style="border-bottom: 1px solid #333; padding: 4px 0; color: ${color}; font-family: monospace;">
+                    <span style="opacity:0.5; margin-right: 10px;">[${timeStr}]</span> 
+                    ${log.message}
+                </div>`;
+            });
+            container.innerHTML = html;
+        })
+        .catch(err => {
+            container.innerHTML = `<div style="color: red;">Failed to fetch logs: ${err}</div>`;
+        });
+    }
+
+    // --- Action Triggers ---
+    function triggerAction(url, method='GET') {
+         // Some endpoints might need POST, others GET. We handle both.
+         const opts = method === 'POST' ? { method: 'POST' } : {};
+         
+         fetch(url + `?shop_url=${SHOP_URL}`, opts)
+         .then(r => {
+            showToast("Action Triggered - Check Logs");
+            setTimeout(fetchLogs, 1000); // Wait 1s then refresh logs
+         });
+    }
+
+    // Start polling
+    setInterval(fetchLogs, 5000);
+    fetchLogs();
+</script>
 </body>
 </html>
