@@ -3,6 +3,14 @@ import ssl
 
 class OdooClient:
 
+    # --- ADD THIS INSIDE OdooClient CLASS ---
+    def get_partner_category_names(self, category_ids):
+        """Fetches names of Customer Tags (res.partner.category)"""
+        if not category_ids: return []
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'res.partner.category', 'read', [category_ids], {'fields': ['name']})
+        return [r['name'] for r in data]
+
     def get_tag_names(self, tag_ids):
         """Fetches partner tag names (Categories in Odoo)"""
         if not tag_ids: return []
