@@ -163,7 +163,7 @@
 
         // --- 1. LOAD SETTINGS ---
         function loadSettings() {
-            fetch(`/api/get_settings?shop_url=${SHOP_URL}`)
+            fetch(`/api/get_settings?shop_url=${SHOP_URL}&t=${Date.now()}`)
             .then(r => r.json())
             .then(data => {
                 // Credentials
