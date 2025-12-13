@@ -36,6 +36,13 @@ shopify.Session.setup(api_key=SHOPIFY_API_KEY, secret=SHOPIFY_SECRET)
 order_processing_lock = threading.Lock()
 active_processing_ids = set()
 
+
+# --- CRITICAL FIX: Disable Strict Scope Validation ---
+# This forces the library to accept new scopes like 'customer_write_customers'
+from shopify import api_access
+api_access.ApiAccess = lambda x: x 
+
+# ... app = Flask(__name__) starts here ...
 # --- HELPERS ---
 def get_shop_config(shop_id, key, default=None):
     try:
