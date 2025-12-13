@@ -161,28 +161,35 @@
             new bootstrap.Toast(el).show();
         }
 
-        // --- 1. LOAD SETTINGS ---
+        // --- REPLACE THE loadSettings FUNCTION ---
         function loadSettings() {
             fetch(`/api/get_settings?shop_url=${SHOP_URL}&t=${Date.now()}`)
             .then(r => r.json())
             .then(data => {
-                // Credentials
+                // Text Inputs
                 if(data.odoo_url) document.getElementById('odooUrl').value = data.odoo_url;
                 if(data.odoo_db) document.getElementById('odooDb').value = data.odoo_db;
                 if(data.odoo_username) document.getElementById('odooUser').value = data.odoo_username;
                 if(data.odoo_company_id) document.getElementById('odooCompanyId').value = data.odoo_company_id;
                 
-                // Configs
+                // Password Placeholder Logic
+                if(data.has_password) {
+                    document.getElementById('odooPass').placeholder = "(Saved - Leave empty to keep)";
+                } else {
+                    document.getElementById('odooPass').placeholder = "Enter Password";
+                }
+                
+                // Configs (Handle Selects and Checkboxes strictly)
                 if(data.inventory_field) document.getElementById('invType').value = data.inventory_field;
                 if(data.inventory_locations) document.getElementById('invLocations').value = data.inventory_locations;
                 
-                // Toggles (Ensure boolean handling)
-                document.getElementById('checkZeroStock').checked = data.sync_zero_stock === true || data.sync_zero_stock === 'true';
-                document.getElementById('prodSyncPrice').checked = data.prod_sync_price === true;
-                document.getElementById('prodSyncTitle').checked = data.prod_sync_title === true;
-                document.getElementById('prodSyncDesc').checked = data.prod_sync_desc === true;
-                document.getElementById('prodSyncImages').checked = data.prod_sync_images === true;
-                document.getElementById('prodAutoCreate').checked = data.prod_auto_create === true;
+                // Use '!!' to force boolean conversion
+                document.getElementById('checkZeroStock').checked = !!data.sync_zero_stock;
+                document.getElementById('prodSyncPrice').checked = !!data.prod_sync_price;
+                document.getElementById('prodSyncTitle').checked = !!data.prod_sync_title;
+                document.getElementById('prodSyncDesc').checked = !!data.prod_sync_desc;
+                document.getElementById('prodSyncImages').checked = !!data.prod_sync_images;
+                document.getElementById('prodAutoCreate').checked = !!data.prod_auto_create;
             });
         }
         
