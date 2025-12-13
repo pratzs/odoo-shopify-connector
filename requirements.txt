@@ -7,3 +7,4 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 ShopifyAPI==12.5.0
 schedule==1.2.1
+psycopg2-binary
