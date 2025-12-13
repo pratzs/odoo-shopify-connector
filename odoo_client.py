@@ -2,6 +2,23 @@ import xmlrpc.client
 import ssl
 
 class OdooClient:
+
+    def get_tag_names(self, tag_ids):
+        """Fetches partner tag names (Categories in Odoo)"""
+        if not tag_ids: return []
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            'res.partner.category', 'read', [tag_ids], {'fields': ['name']})
+        return [t['name'] for t in data]
+
+    def get_vendor_product_code(self, product_id):
+        """Gets the Vendor Product Code (from first supplier info)"""
+        ids = self.models.execute_kw(self.db, self.uid, self.password, 
+            'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]], {'limit': 1})
+        if ids:
+            data = self.models.execute_kw(self.db, self.uid, self.password, 
+                'product.supplierinfo', 'read', [ids[0]], {'fields': ['product_code']})
+            if data: return data[0].get('product_code')
+        return None
     def __init__(self, url, db, username, password):
         self.url = url
         self.db = db
