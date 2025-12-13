@@ -437,6 +437,11 @@ def callback():
     db.session.commit()
     return redirect(url_for('index', shop=shop_url))
 
+@app.route('/live_logs_frame')
+def live_logs_frame():
+    # This route allows the dashboard to load the HTML file safely
+    return render_template('live_logs.html')
+
 
 from sqlalchemy import text  # Make sure to import 'text'
 
