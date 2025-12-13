@@ -10,191 +10,135 @@
         body { background-color: #f8f9fa; }
         .card { box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: none; margin-bottom: 20px; }
         .log-frame-container {
-            height: 600px;
-            width: 100%;
-            border-radius: 0.375rem;
-            overflow: hidden;
-            border: 1px solid #dee2e6;
-            background-color: #1e1e1e; /* Dark background for logs */
-            color: #00ff00; /* Console green text */
-            font-family: monospace;
-            padding: 15px;
-            overflow-y: scroll;
+            height: 500px; width: 100%; border-radius: 0.375rem; overflow: hidden;
+            border: 1px solid #dee2e6; background-color: #1e1e1e; color: #00ff00;
+            font-family: monospace; padding: 15px; overflow-y: scroll; font-size: 0.9rem;
         }
-        .log-entry { border-bottom: 1px solid #333; padding: 4px 0; }
-        .log-error { color: #ff4d4d; }
-        .log-success { color: #00ff00; }
-        .log-info { color: #cccccc; }
-        .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;}
+        .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; border-bottom: 1px solid #eee; padding-bottom: 0.5rem;}
         .form-label-sm { font-size: 0.85rem; font-weight: 600; color: #6c757d; }
+        .badge-synced { background-color: #d1e7dd; color: #0f5132; }
+        .badge-pending { background-color: #fff3cd; color: #664d03; }
+        .badge-error { background-color: #f8d7da; color: #842029; }
     </style>
 </head>
 <body>
 
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
         <div class="container">
-            <a class="navbar-brand" href="#">
-                <i class="bi bi-arrow-left-right"></i> Tripster Connector
-            </a>
-            <div class="d-flex align-items-center gap-3">
-                <span class="navbar-text text-light small">
-                    Store: <strong id="shopNameDisplay">{{ shop.shop_url }}</strong>
-                </span>
-            </div>
+            <span class="navbar-brand"><i class="bi bi-arrow-left-right"></i> Tripster Connector</span>
+            <span class="navbar-text text-light small">Store: <strong>{{ shop.shop_url }}</strong></span>
         </div>
     </nav>
 
     <div class="container">
         
-        <div class="row mb-4">
-            <div class="col-md-12">
-                <div class="card">
-                    <div class="card-header bg-white" data-bs-toggle="collapse" href="#odooConfigCollapse" role="button" aria-expanded="false">
-                        <h5 class="mb-0"><i class="bi bi-database-fill-gear"></i> Odoo Connection (Click to Edit)</h5>
-                    </div>
-                    <div class="collapse" id="odooConfigCollapse">
-                        <div class="card-body">
-                            <form id="odooCredsForm">
-                                <div class="row g-3">
-                                    <div class="col-md-6">
-                                        <label class="form-label-sm">Odoo URL (No trailing slash)</label>
-                                        <input type="text" class="form-control" id="odooUrl" value="{{ shop.odoo_url or '' }}" required placeholder="https://odoo.mycompany.com">
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label-sm">Database Name</label>
-                                        <input type="text" class="form-control" id="odooDb" value="{{ shop.odoo_db or '' }}" required>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label-sm">Username (Email)</label>
-                                        <input type="text" class="form-control" id="odooUser" value="{{ shop.odoo_username or '' }}" required>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label-sm">API Key / Password</label>
-                                        <input type="password" class="form-control" id="odooPass" value="{{ shop.odoo_password or '' }}" required>
-                                    </div>
-                                    <div class="col-12 text-end">
-                                        <button type="submit" class="btn btn-primary" id="saveCredsBtn">
-                                            <i class="bi bi-plug"></i> Save & Test Connection
-                                        </button>
-                                    </div>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <div class="card">
             <div class="card-header bg-white">
                 <ul class="nav nav-tabs card-header-tabs" id="mainTabs" role="tablist">
-                    <li class="nav-item">
-                        <a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Live Logs</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Sync Settings</a>
-                    </li>
+                    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#live-logs"><i class="bi bi-activity"></i> Logs</a></li>
+                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#orders" onclick="loadOrders()"><i class="bi bi-cart"></i> Manage Orders</a></li>
+                    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#settings"><i class="bi bi-gear"></i> Settings</a></li>
                 </ul>
             </div>
+            
             <div class="card-body p-0">
                 <div class="tab-content">
                     
                     <div class="tab-pane fade show active p-3" id="live-logs">
                         <div id="log-container" class="log-frame-container">
-                            <div class="text-center text-muted mt-5">Waiting for logs...</div>
+                            <div class="text-center text-muted mt-5">Loading logs...</div>
                         </div>
                     </div>
                     
+                    <div class="tab-pane fade p-3" id="orders">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6 class="m-0">Last 20 Shopify Orders</h6>
+                            <button onclick="loadOrders()" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-clockwise"></i> Refresh List</button>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Order</th>
+                                        <th>Date</th>
+                                        <th>Total</th>
+                                        <th>Payment</th>
+                                        <th>Sync Status</th>
+                                        <th class="text-end">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ordersTableBody">
+                                    <tr><td colspan="6" class="text-center text-muted py-4">Click Refresh to load orders</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <div class="tab-pane fade p-4" id="settings">
                         
-                        <div class="mb-4">
-                            <h6 class="text-muted text-uppercase small fw-bold mb-3">Manual Actions</h6>
-                            <div class="d-flex gap-2 flex-wrap">
-                                <button onclick="triggerAction('/sync/inventory')" class="btn btn-sm btn-outline-primary"><i class="bi bi-box-seam"></i> Sync Inventory Now</button>
-                                <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-sm btn-outline-warning text-dark"><i class="bi bi-arrow-repeat"></i> Sync All Products</button>
-                                <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-sm btn-outline-success"><i class="bi bi-people"></i> Sync Customers</button>
-                            </div>
+                        <div class="mb-5">
+                            <div class="section-header"><i class="bi bi-database"></i> Odoo Credentials</div>
+                            <form id="odooCredsForm">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Odoo URL (No slash at end)</label>
+                                        <input type="text" class="form-control" id="odooUrl" placeholder="https://odoo.mycompany.com">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Database</label>
+                                        <input type="text" class="form-control" id="odooDb">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Username</label>
+                                        <input type="text" class="form-control" id="odooUser">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label-sm">Password / API Key</label>
+                                        <input type="password" class="form-control" id="odooPass" placeholder="(Hidden for security)">
+                                    </div>
+                                    <div class="col-12">
+                                        <button type="submit" class="btn btn-primary w-100" id="saveCredsBtn">
+                                            <i class="bi bi-save"></i> Save Settings & Test Connection
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
                         </div>
-                        <hr>
 
-                        <div id="settingsContent">
-                            
-                            <div class="mb-4">
-                                <div class="section-header"><i class="bi bi-building"></i> General</div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="section-header"><i class="bi bi-boxes"></i> Inventory Rules</div>
                                 <div class="mb-3">
-                                    <label class="form-label-sm">Odoo Company Context (ID)</label>
+                                    <label class="form-label-sm">Odoo Company ID</label>
                                     <input type="text" class="form-control" id="odooCompanyId" placeholder="e.g. 1">
-                                    <div class="form-text">Leave blank to use default. Check URL in Odoo for 'cid=X'.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label-sm">Inventory Field</label>
+                                    <select class="form-select" id="invType">
+                                        <option value="qty_available">Quantity On Hand</option>
+                                        <option value="virtual_available">Forecasted Quantity</option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label-sm">Location IDs (Comma separated)</label>
+                                    <input type="text" class="form-control" id="invLocations">
+                                </div>
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" id="checkZeroStock">
+                                    <label class="form-check-label">Do not sync zero stock</label>
                                 </div>
                             </div>
 
-                            <div class="card mb-4 bg-light">
-                                <div class="card-body">
-                                    <div class="section-header"><i class="bi bi-boxes"></i> Inventory</div>
-                                    <div class="row">
-                                        <div class="col-md-6">
-                                            <div class="mb-3">
-                                                <label class="form-label-sm">Inventory Field</label>
-                                                <select class="form-select" id="invType">
-                                                    <option value="qty_available">Quantity On Hand</option>
-                                                    <option value="virtual_available">Forecasted Quantity</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <div class="form-check form-switch mt-4">
-                                                <input class="form-check-input" type="checkbox" id="checkZeroStock">
-                                                <label class="form-check-label">Do not sync zero stock</label>
-                                            </div>
-                                            <div class="form-check form-switch mt-2">
-                                                <input class="form-check-input" type="checkbox" id="checkCommitted">
-                                                <label class="form-check-label">Combine Committed Stock</label>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="mt-2">
-                                        <label class="form-label-sm">Odoo Location IDs (Comma Separated)</label>
-                                        <input type="text" class="form-control" id="invLocations" placeholder="e.g. 8, 12">
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="card mb-4 bg-light">
-                                <div class="card-body">
-                                    <div class="section-header"><i class="bi bi-box"></i> Product Sync</div>
-                                    <div class="row">
-                                        <div class="col-md-6">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="prodSyncPrice" checked>
-                                                <label class="form-check-label">Sync Price</label>
-                                            </div>
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="prodSyncTitle" checked>
-                                                <label class="form-check-label">Sync Title</label>
-                                            </div>
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="prodSyncDesc" checked>
-                                                <label class="form-check-label">Sync Description</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="prodSyncImages">
-                                                <label class="form-check-label">Sync Images (Slow)</label>
-                                            </div>
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="prodAutoCreate">
-                                                <label class="form-check-label">Create New Products in Shopify</label>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="text-end sticky-bottom bg-white py-3 border-top">
-                                <button onclick="saveSyncSettings()" class="btn btn-success btn-lg px-5 shadow"><i class="bi bi-save"></i> Save Configuration</button>
+                            <div class="col-md-6">
+                                <div class="section-header"><i class="bi bi-box-seam"></i> Product Rules</div>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodSyncPrice"><label class="form-check-label">Sync Price</label></div>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodSyncTitle"><label class="form-check-label">Sync Title</label></div>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodSyncDesc"><label class="form-check-label">Sync Description</label></div>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodSyncImages"><label class="form-check-label">Sync Images</label></div>
+                                <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="prodAutoCreate"><label class="form-check-label">Create New Products in Shopify</label></div>
                             </div>
                         </div>
+
                     </div> 
                 </div>
             </div>
@@ -203,133 +147,178 @@
 
     <div class="toast-container position-fixed bottom-0 end-0 p-3">
         <div id="liveToast" class="toast align-items-center text-white bg-primary border-0" role="alert">
-            <div class="d-flex">
-                <div class="toast-body" id="toastMessage"></div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
+            <div class="d-flex"><div class="toast-body" id="toastMessage"></div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-    const SHOP_URL = "{{ shop.shop_url }}"; 
-    
-    function showToast(msg, type='primary') {
-        const el = document.getElementById('liveToast');
-        el.className = `toast align-items-center text-white bg-${type} border-0`;
-        document.getElementById('toastMessage').innerText = msg;
-        new bootstrap.Toast(el).show();
-    }
-
-    // --- Save Odoo Credentials ---
-    document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
-        e.preventDefault();
-        const btn = document.getElementById('saveCredsBtn');
-        btn.disabled = true; btn.innerHTML = 'Connecting...';
-
-        const payload = {
-            shop_url: SHOP_URL,
-            odoo_url: document.getElementById('odooUrl').value,
-            odoo_db: document.getElementById('odooDb').value,
-            odoo_username: document.getElementById('odooUser').value,
-            odoo_password: document.getElementById('odooPass').value
-        };
-
-        postSettings(payload, btn);
-    });
-
-    // --- Save Sync Settings ---
-    function saveSyncSettings() {
-        const locsRaw = document.getElementById('invLocations').value;
-        const locs = locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [];
-
-        const payload = {
-            shop_url: SHOP_URL,
-            odoo_company_id: document.getElementById('odooCompanyId').value,
-            inventory_field: document.getElementById('invType').value,
-            sync_zero_stock: document.getElementById('checkZeroStock').checked,
-            inventory_locations: locs,
-            
-            prod_sync_price: document.getElementById('prodSyncPrice').checked,
-            prod_sync_title: document.getElementById('prodSyncTitle').checked,
-            prod_sync_desc: document.getElementById('prodSyncDesc').checked,
-            prod_sync_images: document.getElementById('prodSyncImages').checked,
-            prod_auto_create: document.getElementById('prodAutoCreate').checked
-        };
-        postSettings(payload);
-    }
-
-    function postSettings(payload, btn=null) {
-        fetch('/api/save_settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        })
-        .then(r => r.json())
-        .then(data => {
-            if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
-            if(data.error) showToast(data.error, 'danger');
-            else {
-                showToast(data.message, 'success');
-                fetchLogs(); // Refresh logs immediately after saving
-            }
-        })
-        .catch(err => {
-            if(btn) { btn.disabled = false; btn.innerHTML = 'Save & Test Connection'; }
-            showToast("Network Error: " + err, 'danger');
-        });
-    }
-
-    // --- Live Logs (Updated for Visibility) ---
-    function fetchLogs() {
-        const container = document.getElementById('log-container');
+        const SHOP_URL = "{{ shop.shop_url }}"; 
         
-        fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
-        .then(r => r.json())
-        .then(data => {
-            if(data.length === 0) {
-                container.innerHTML = '<div style="color: #555; text-align: center; margin-top: 20px;">-- No logs found. Click "Save & Test Connection" to generate one. --</div>';
-                return;
-            }
-            
-            let html = '';
-            data.forEach(log => {
-                let color = '#cccccc'; // Default Info (Gray/White)
-                if(log.message.toLowerCase().includes('error')) color = '#ff4d4d'; // Red
-                if(log.message.toLowerCase().includes('success')) color = '#00ff00'; // Green
-                if(log.message.toLowerCase().includes('connected')) color = '#00ff00'; // Green
+        function showToast(msg, type='primary') {
+            const el = document.getElementById('liveToast');
+            el.className = `toast align-items-center text-white bg-${type} border-0`;
+            document.getElementById('toastMessage').innerText = msg;
+            new bootstrap.Toast(el).show();
+        }
+
+        // --- 1. LOAD SETTINGS ON START ---
+        function loadSettings() {
+            fetch(`/api/get_settings?shop_url=${SHOP_URL}`)
+            .then(r => r.json())
+            .then(data => {
+                // Populate Fields
+                if(data.odoo_url) document.getElementById('odooUrl').value = data.odoo_url;
+                if(data.odoo_db) document.getElementById('odooDb').value = data.odoo_db;
+                if(data.odoo_username) document.getElementById('odooUser').value = data.odoo_username;
+                if(data.odoo_company_id) document.getElementById('odooCompanyId').value = data.odoo_company_id;
                 
-                // Format timestamp safely
-                let timeStr = log.timestamp;
-                try { timeStr = log.timestamp.split('T')[1].split('.')[0]; } catch(e){}
+                // Inventory
+                if(data.inventory_field) document.getElementById('invType').value = data.inventory_field;
+                if(data.inventory_locations) document.getElementById('invLocations').value = data.inventory_locations;
+                document.getElementById('checkZeroStock').checked = data.sync_zero_stock || false;
 
-                html += `<div style="border-bottom: 1px solid #333; padding: 4px 0; color: ${color}; font-family: monospace;">
-                    <span style="opacity:0.5; margin-right: 10px;">[${timeStr}]</span> 
-                    ${log.message}
-                </div>`;
+                // Products
+                document.getElementById('prodSyncPrice').checked = data.prod_sync_price || false;
+                document.getElementById('prodSyncTitle').checked = data.prod_sync_title || false;
+                document.getElementById('prodSyncDesc').checked = data.prod_sync_desc || false;
+                document.getElementById('prodSyncImages').checked = data.prod_sync_images || false;
+                document.getElementById('prodAutoCreate').checked = data.prod_auto_create || false;
             });
-            container.innerHTML = html;
-        })
-        .catch(err => {
-            container.innerHTML = `<div style="color: red;">Failed to fetch logs: ${err}</div>`;
+        }
+        
+        // Call immediately
+        loadSettings();
+
+        // --- 2. SAVE SETTINGS ---
+        document.getElementById('odooCredsForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('saveCredsBtn');
+            const originalText = btn.innerHTML;
+            btn.disabled = true; btn.innerHTML = 'Saving & Testing...';
+
+            // Gather all data (Creds + Settings)
+            const locsRaw = document.getElementById('invLocations').value;
+            const payload = {
+                shop_url: SHOP_URL,
+                odoo_url: document.getElementById('odooUrl').value,
+                odoo_db: document.getElementById('odooDb').value,
+                odoo_username: document.getElementById('odooUser').value,
+                odoo_password: document.getElementById('odooPass').value, // Only sends if user typed it
+                odoo_company_id: document.getElementById('odooCompanyId').value,
+                
+                inventory_field: document.getElementById('invType').value,
+                inventory_locations: locsRaw ? locsRaw.split(',').map(Number).filter(n => n) : [],
+                sync_zero_stock: document.getElementById('checkZeroStock').checked,
+                
+                prod_sync_price: document.getElementById('prodSyncPrice').checked,
+                prod_sync_title: document.getElementById('prodSyncTitle').checked,
+                prod_sync_desc: document.getElementById('prodSyncDesc').checked,
+                prod_sync_images: document.getElementById('prodSyncImages').checked,
+                prod_auto_create: document.getElementById('prodAutoCreate').checked
+            };
+
+            fetch('/api/save_settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false; btn.innerHTML = originalText;
+                if(data.error) showToast(data.error, 'danger');
+                else {
+                    showToast(data.message, 'success');
+                    fetchLogs(); // Refresh logs to see connection result
+                }
+            })
+            .catch(err => {
+                btn.disabled = false; btn.innerHTML = originalText;
+                showToast("Network Error", 'danger');
+            });
         });
-    }
 
-    // --- Action Triggers ---
-    function triggerAction(url, method='GET') {
-         // Some endpoints might need POST, others GET. We handle both.
-         const opts = method === 'POST' ? { method: 'POST' } : {};
-         
-         fetch(url + `?shop_url=${SHOP_URL}`, opts)
-         .then(r => {
-            showToast("Action Triggered - Check Logs");
-            setTimeout(fetchLogs, 1000); // Wait 1s then refresh logs
-         });
-    }
+        // --- 3. FETCH ORDERS ---
+        function loadOrders() {
+            const tbody = document.getElementById('ordersTableBody');
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center">Loading from Shopify...</td></tr>';
+            
+            fetch(`/api/orders/recent?shop_url=${SHOP_URL}`)
+            .then(r => r.json())
+            .then(data => {
+                if(data.error) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-danger">Error: ${data.error}</td></tr>`;
+                    return;
+                }
+                if(data.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center">No orders found.</td></tr>`;
+                    return;
+                }
+                
+                let html = '';
+                data.forEach(o => {
+                    let badge = 'bg-secondary';
+                    if(o.sync_status === 'Synced') badge = 'badge-synced';
+                    if(o.sync_status === 'Pending') badge = 'badge-pending';
+                    if(o.sync_status === 'Error') badge = 'badge-error';
 
-    // Start polling
-    setInterval(fetchLogs, 5000);
-    fetchLogs();
-</script>
+                    html += `<tr>
+                        <td><strong>${o.name}</strong></td>
+                        <td>${new Date(o.created_at).toLocaleDateString()}</td>
+                        <td>${o.total}</td>
+                        <td>${o.financial_status}</td>
+                        <td><span class="badge ${badge}">${o.sync_status}</span></td>
+                        <td class="text-end">
+                            <button onclick="syncOrder('${o.id}')" class="btn btn-sm btn-primary">Sync Now</button>
+                        </td>
+                    </tr>`;
+                });
+                tbody.innerHTML = html;
+            });
+        }
+
+        // --- 4. MANUAL SYNC SINGLE ORDER ---
+        function syncOrder(orderId) {
+            showToast("Syncing Order...", 'primary');
+            fetch('/api/orders/sync', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ shop_url: SHOP_URL, order_id: orderId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if(data.error) showToast(data.error, 'danger');
+                else {
+                    showToast(data.message, 'success');
+                    fetchLogs(); // See the result in logs
+                    loadOrders(); // Refresh table status
+                }
+            });
+        }
+
+        // --- 5. LOGS ---
+        function fetchLogs() {
+            const container = document.getElementById('log-container');
+            fetch(`/api/logs/live?shop_url=${SHOP_URL}`)
+            .then(r => r.json())
+            .then(data => {
+                if(data.length === 0) {
+                    container.innerHTML = '<div style="color: #555; text-align: center; margin-top: 50px;">-- No logs yet --</div>';
+                    return;
+                }
+                let html = '';
+                data.forEach(log => {
+                    let color = '#ccc';
+                    if(log.message.includes('Success')) color = '#0f0';
+                    if(log.message.includes('Error')) color = '#f55';
+                    html += `<div style="border-bottom: 1px solid #333; padding: 2px 0; color: ${color}">[${log.timestamp.split('T')[1].split('.')[0]}] ${log.message}</div>`;
+                });
+                container.innerHTML = html;
+            });
+        }
+
+        setInterval(fetchLogs, 5000);
+        fetchLogs();
+    </script>
 </body>
 </html>
