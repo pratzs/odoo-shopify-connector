@@ -149,6 +149,7 @@ def process_order_data(data, shop, odoo):
             if company_id: vals['company_id'] = int(company_id)
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': vals['name']}
+
         
         # Use parent ID if it's a contact
         partner_id = extract_id(partner.get('id'))
