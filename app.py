@@ -151,7 +151,7 @@ def process_order_data(data, shop, odoo):
             partner = {'id': partner_id, 'name': vals['name']}
         
         # Use parent ID if it's a contact
-        partner_id = extract_id(partner.get('parent_id') or partner.get('id'))
+        partner_id = extract_id(partner.get('id'))
 
         # Helper for Addresses (Invoice/Shipping)
         def get_child(addr_data, type_val):
