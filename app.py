@@ -14,6 +14,7 @@ from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, Shop
 from odoo_client import OdooClient
 from datetime import datetime, timedelta
 
+
 # --- MONKEY PATCH: FORCE SHOPIFY TO ACCEPT NEW SCOPES ---
 class PermissiveApiAccess(shopify.api_access.ApiAccess):
     def __init__(self, scopes):
